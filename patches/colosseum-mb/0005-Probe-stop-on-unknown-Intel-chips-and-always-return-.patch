@@ -1,0 +1,243 @@
+From a318ce0165417692695e4c1d0092e5d74e76895b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 21:12:49 +0800
+Subject: [PATCH 05/14] Probe: stop on unknown Intel chips and always return to
+ read-array mode
+
+Program polling now checks DQ5, and a timed-out program is reset before
+leaving unlock bypass. Tests cover unknown chips and program failures.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JPQshc9oBXnzvR2E67Khm
+---
+ payload/src/repro/repro_cart.c | 56 ++++++++++++++++++++++++++++------
+ repro_tools/test/sim_cart.c    | 11 ++++++-
+ repro_tools/test/sim_cart.h    |  1 +
+ repro_tools/test/test_write.c  | 15 ++++++++-
+ 4 files changed, 71 insertions(+), 12 deletions(-)
+
+diff --git a/payload/src/repro/repro_cart.c b/payload/src/repro/repro_cart.c
+index 2cca454..7ad6df2 100644
+--- a/payload/src/repro/repro_cart.c
++++ b/payload/src/repro/repro_cart.c
+@@ -122,16 +122,22 @@ static bool32 IsIntel(const struct ReproCart *cart)
+     return cart->type == REPRO_CART_INTEL_BUFFERED || cart->type == REPRO_CART_INTEL_WORD;
+ }
+ 
++// Returns any supported chip to read-array mode: AMD reset on both byte
++// lanes, then Intel read array (an AMD chip in read mode ignores 0xFF).
++static void ResetAnyChip(void)
++{
++    ROM_WRITE16(0, 0xF0F0);
++    ROM_WRITE16(0, 0xFFFF);
++}
++
+ void ReproCart_ReadArrayMode(const struct ReproCart *cart)
+ {
+-    if (IsIntel(cart))
+-    {
++    if (cart->type == REPRO_CART_UNKNOWN)
++        ResetAnyChip();
++    else if (IsIntel(cart))
+         ROM_WRITE16(0, 0xFF);
+-    }
+     else
+-    {
+         ROM_WRITE16(0, 0xF0 * cart->cmdMultiplier);
+-    }
+ }
+ 
+ // Identifies the board with the same probe sequence as the cart's own code,
+@@ -169,6 +175,15 @@ const struct ReproCart *ReproCart_Probe(void)
+         goto done;
+     }
+ 
++    // An AMD chip ignores a lone 0x90, so word 1 still reads as cart header.
++    // Anything else is an Intel-style chip this code does not know: stop
++    // here rather than send it AMD commands.
++    if (id != header1)
++    {
++        ROM_WRITE16(0, 0xFF);
++        goto done;
++    }
++
+     ROM_WRITE16(0, 0xF0);
+ 
+     // AMD autoselect, x16, with D0/D1 swapped unlock data.
+@@ -219,8 +234,7 @@ done:
+     // The chip must be back in read-array mode before anything continues.
+     if (ROM_READ16(0) != header0 || ROM_READ16(2) != header1)
+     {
+-        ROM_WRITE16(0, 0xFF);
+-        ROM_WRITE16(0, 0xF0);
++        ResetAnyChip();
+         type = REPRO_CART_UNKNOWN;
+     }
+ 
+@@ -320,14 +334,32 @@ static u16 AmdEraseBlock(const struct ReproCart *cart, u32 romOffset)
+     return result;
+ }
+ 
+-static u16 AmdWaitProgram(u32 romOffset, u16 value)
++// Data polling: done when the word reads back as written. A lane that has
++// not finished and shows DQ5 has exceeded its time limit.
++static u16 AmdWaitProgram(const struct ReproCart *cart, u32 romOffset, u16 value)
+ {
+     u32 polls;
++    u32 shift;
+ 
+     for (polls = 0; polls < POLL_LIMIT; polls++)
+     {
+-        if (ROM_READ16(romOffset) == value)
++        u16 read = ROM_READ16(romOffset);
++
++        if (read == value)
+             return REPRO_OK;
++
++        for (shift = 0; shift < 16; shift += 8)
++        {
++            u16 laneMask = 0xFF << shift;
++
++            if (!(cart->statusMask & (0x80 << shift)))
++                continue;
++            if ((read & laneMask) != (value & laneMask) && (read & (0x20 << shift)))
++            {
++                if ((ROM_READ16(romOffset) & laneMask) != (value & laneMask))
++                    return REPRO_ERR_STATUS;
++            }
++        }
+     }
+ 
+     return REPRO_ERR_TIMEOUT;
+@@ -356,7 +388,7 @@ static u16 AmdProgramWords(const struct ReproCart *cart, u32 romOffset, u32 unit
+             ROM_WRITE16(cart->unlockAddr1, 0xA0 * m);
+         }
+         ROM_WRITE16(romOffset + i, value);
+-        result = AmdWaitProgram(romOffset + i, value);
++        result = AmdWaitProgram(cart, romOffset + i, value);
+     }
+ 
+     return result;
+@@ -375,6 +407,10 @@ static u16 AmdProgramUnit(const struct ReproCart *cart, u32 romOffset, u32 unitO
+ 
+     result = AmdProgramWords(cart, romOffset, unitOffset, cart->programUnit);
+ 
++    // A timed-out operation only accepts a reset.
++    if (result != REPRO_OK)
++        ROM_WRITE16(romOffset, 0xF0 * m);
++
+     if (cart->useBypass)
+     {
+         // Leave unlock bypass mode.
+diff --git a/repro_tools/test/sim_cart.c b/repro_tools/test/sim_cart.c
+index b294acb..9770bca 100644
+--- a/repro_tools/test/sim_cart.c
++++ b/repro_tools/test/sim_cart.c
+@@ -510,6 +510,7 @@ uint16_t HostRomRead16(uint32_t offset)
+     {
+     case SIM_INTEL_BUFFERED:
+     case SIM_INTEL_WORD:
++    case SIM_INTEL_UNKNOWN:
+         return IntelRead(offset);
+     case SIM_AMD_SWAPPED:
+     {
+@@ -543,6 +544,7 @@ void HostRomWrite16(uint32_t offset, uint16_t value)
+     {
+     case SIM_INTEL_BUFFERED:
+     case SIM_INTEL_WORD:
++    case SIM_INTEL_UNKNOWN:
+         IntelWrite(offset, value, &programmed, &erased);
+         break;
+     case SIM_AMD_SWAPPED:
+@@ -576,7 +578,7 @@ void HostRomWrite16(uint32_t offset, uint16_t value)
+ 
+     if (erased)
+     {
+-        sStats.erases += (sBoard == SIM_INTEL_BUFFERED || sBoard == SIM_INTEL_WORD) ? 1 : 0;
++        sStats.erases += (sBoard == SIM_INTEL_BUFFERED || sBoard == SIM_INTEL_WORD || sBoard == SIM_INTEL_UNKNOWN) ? 1 : 0;
+         sFailErase = 0;
+     }
+     if (programmed)
+@@ -677,6 +679,13 @@ void SimInit(enum SimBoard board, uint32_t seed)
+         memset(sIntel.locked, 1, sizeof(sIntel.locked));
+         sEraseBlock = 0x10000;
+         break;
++    case SIM_INTEL_UNKNOWN:
++        sIntel.manufacturer = 0x89;
++        sIntel.device = 0x1234;
++        sIntel.sr = 0x80;
++        memset(sIntel.locked, 1, sizeof(sIntel.locked));
++        sEraseBlock = 0x20000;
++        break;
+     default:
+         sEraseBlock = 0x10000;
+         break;
+diff --git a/repro_tools/test/sim_cart.h b/repro_tools/test/sim_cart.h
+index b721c74..759eae2 100644
+--- a/repro_tools/test/sim_cart.h
++++ b/repro_tools/test/sim_cart.h
+@@ -16,6 +16,7 @@ enum SimBoard
+     SIM_AMD_SWAPPED,     // AMD x16, D0/D1 swapped
+     SIM_AMD_DUAL,        // two AMD x8 chips, low chip D0/D1 swapped
+     SIM_AMD_X16,         // AMD x16 that answers CFI on both lanes
++    SIM_INTEL_UNKNOWN,   // Intel command set, device ID not in any list
+ };
+ 
+ struct SimStats
+diff --git a/repro_tools/test/test_write.c b/repro_tools/test/test_write.c
+index d9399ab..2e99bea 100644
+--- a/repro_tools/test/test_write.c
++++ b/repro_tools/test/test_write.c
+@@ -9,6 +9,8 @@
+ #include "repro_cart.h"
+ #include "repro_image.h"
+ 
++uint16_t HostRomRead16(uint32_t offset);
++
+ #define SAVE_OFFSET 0xFC0000
+ #define SECTOR 0x1000
+ 
+@@ -88,7 +90,7 @@ static int rom_matches_image(const uint8_t *rom, const uint8_t *expected, uint32
+     return 1;
+ }
+ 
+-static const char *sBoardNames[] = {"plain ROM", "Intel buffered", "Intel word", "AMD swapped", "AMD dual x8", "AMD x16"};
++static const char *sBoardNames[] = {"plain ROM", "Intel buffered", "Intel word", "AMD swapped", "AMD dual x8", "AMD x16", "Intel, unknown ID"};
+ 
+ static void test_board(enum SimBoard board, int expectedType, int expectSupported)
+ {
+@@ -121,6 +123,7 @@ static void test_board(enum SimBoard board, int expectedType, int expectSupporte
+     CHECK(cart->type == expectedType, "probe gave type %d, expected %d", cart->type, expectedType);
+     CHECK(cart->supported == expectSupported, "supported flag");
+     CHECK(memcmp(rom, before, SIM_ROM_SIZE) == 0, "probe changed ROM contents");
++    CHECK(HostRomRead16(0) == 0x002E && HostRomRead16(2) == 0xEA00, "chip not back in read-array mode after the probe");
+     if (!cart->supported)
+     {
+         CHECK(ReproImage_Commit(cart, SAVE_OFFSET) == REPRO_ERR_UNSUPPORTED, "commit on unsupported board");
+@@ -179,6 +182,15 @@ static void test_board(enum SimBoard board, int expectedType, int expectSupporte
+     CHECK(ReproImage_Commit(cart, SAVE_OFFSET) == REPRO_OK, "phase 2 after retry");
+     CHECK(ReproScanForSave(rom, ReproGetRomSize(rom), &scan) && scan.newestCounter == 13, "after retry: newest %u", scan.newestCounter);
+ 
++    // A failed word program is reported (or retried) instead of hanging.
++    phase1(0, 14, 6, &lastSector);
++    SimFailNextProgram();
++    result = ReproImage_Commit(cart, SAVE_OFFSET);
++    CHECK(result == REPRO_OK, "commit after one failed program returned 0x%X", result);
++    phase2(lastSector);
++    CHECK(ReproImage_Commit(cart, SAVE_OFFSET) == REPRO_OK, "phase 2 after program failure");
++    CHECK(ReproScanForSave(rom, ReproGetRomSize(rom), &scan) && scan.newestCounter == 14, "after program retry: newest %u", scan.newestCounter);
++
+     CHECK(SimStats()->violations == 0, "%u chip protocol violations, last: %s", SimStats()->violations, SimLastViolation());
+     CHECK(SimStats()->badBankWrites == 0, "%u bank register writes with values this board does not use", SimStats()->badBankWrites);
+     printf("    erases %u, program operations %u, stray writes %u\n", SimStats()->erases, SimStats()->programs, SimStats()->strayWrites);
+@@ -193,6 +205,7 @@ int main(void)
+     test_board(SIM_AMD_X16, REPRO_CART_AMD_X16, 0);
+     test_board(SIM_INTEL_BUFFERED, REPRO_CART_INTEL_BUFFERED, 1);
+     test_board(SIM_INTEL_WORD, REPRO_CART_INTEL_WORD, 1);
++    test_board(SIM_INTEL_UNKNOWN, REPRO_CART_UNKNOWN, 0);
+     printf(failures ? "%d FAILURES\n" : "all write tests passed\n", failures);
+     return failures != 0;
+ }
+-- 
+2.43.0
+

@@ -1,0 +1,2856 @@
+From cbe93314d5d4fbf36a305ea0ab44281faef63865 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 11:01:21 +0800
+Subject: [PATCH 09/14] Add a batteryless edition of GBA Link Cable Dumper for
+ quick save backups
+
+make_batteryless_dumper.py swaps a new GBA side (bldumper.c) into FIX94's
+GBA Link Cable Dumper v1.6 boot.dol, keeping the Wii side and its protocol.
+On batteryless carts the dumper's backup save and restore save then read
+and write the save area in ROM: seconds instead of a full ROM dump. The
+save area is found through the cart's batteryless boot code (the entry
+point jumps to it), so a restore cut off by a power loss can be redone.
+Restores are shown and confirmed on the GBA.
+
+Save writing (savecore.c, shared with the save writer) no longer uses a
+test area: only the save area is erased, by commands sent inside it as the
+cart's own save routine does, everything is erased before anything is
+programmed, and parts left unerased by blocks smaller than CFI reports get
+a second pass. A power cut can then always be recovered by writing again.
+
+Tests replay the dumper's Wii side in Python against the emulated GBA:
+backup, restore on every board, cancel, invalid files, power cuts, clear,
+game and BIOS dumps; and the patcher on a synthetic dol.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JPQshc9oBXnzvR2E67Khm
+---
+ repro_tools/bldumper_code.bin          | Bin 0 -> 14260 bytes
+ repro_tools/flasher/.gitignore         |   1 +
+ repro_tools/flasher/Makefile           |  17 +-
+ repro_tools/flasher/bios.s             |  11 +
+ repro_tools/flasher/bldumper.c         | 442 ++++++++++++++++
+ repro_tools/flasher/savecore.c         | 503 ++++++++++++++++++
+ repro_tools/flasher/savecore.h         |  71 +++
+ repro_tools/flasher/savewriter.c       | 674 +------------------------
+ repro_tools/make_batteryless_dumper.py | 140 +++++
+ repro_tools/savewriter_code.bin        | Bin 13776 -> 12524 bytes
+ repro_tools/test/bldumper_emu_test.py  | 369 ++++++++++++++
+ repro_tools/test/patcher_test.py       | 109 ++++
+ 12 files changed, 1683 insertions(+), 654 deletions(-)
+ create mode 100755 repro_tools/bldumper_code.bin
+ create mode 100644 repro_tools/flasher/bios.s
+ create mode 100644 repro_tools/flasher/bldumper.c
+ create mode 100644 repro_tools/flasher/savecore.c
+ create mode 100644 repro_tools/flasher/savecore.h
+ create mode 100644 repro_tools/make_batteryless_dumper.py
+ create mode 100644 repro_tools/test/bldumper_emu_test.py
+ create mode 100644 repro_tools/test/patcher_test.py
+
+diff --git a/repro_tools/bldumper_code.bin b/repro_tools/bldumper_code.bin
+new file mode 100755
+index 0000000000000000000000000000000000000000..bd1b90e3dfe0ff1a0033b5601858b32be21f42aa
+GIT binary patch
+literal 14260
+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
+Yon<YT*u<q=#rH0+!2dP-5)AkM08<{8LjV8(
+
+literal 0
+HcmV?d00001
+
+diff --git a/repro_tools/flasher/.gitignore b/repro_tools/flasher/.gitignore
+index 442eae1..3d367c1 100644
+--- a/repro_tools/flasher/.gitignore
++++ b/repro_tools/flasher/.gitignore
+@@ -1,3 +1,4 @@
+ build/
+ flasher_code.bin
+ savewriter_code.bin
++bldumper_code.bin
+diff --git a/repro_tools/flasher/Makefile b/repro_tools/flasher/Makefile
+index dbc14ce..226e6b7 100644
+--- a/repro_tools/flasher/Makefile
++++ b/repro_tools/flasher/Makefile
+@@ -1,6 +1,7 @@
+ # Builds the code parts of the two multiboot programs:
+ #   flasher_code.bin     the link program flasher (make_flasher.py adds the data)
+ #   savewriter_code.bin  the save writer (make_save_writer.py adds the data)
++#   bldumper_code.bin    GBA side of the batteryless dumper (make_batteryless_dumper.py)
+ # Needs agbcc in ../../tools/agbcc (see the colosseum-mb INSTALL.md) and
+ # binutils for arm-none-eabi.
+ 
+@@ -21,7 +22,7 @@ BUILD := build
+ COMMON := $(BUILD)/crt0.o $(BUILD)/hash.o $(BUILD)/console.o $(BUILD)/cfi.o $(BUILD)/repro_cart.o
+ LIBS   := -L $(AGBCC)/lib -lgcc -lc
+ 
+-all: flasher_code.bin savewriter_code.bin
++all: flasher_code.bin savewriter_code.bin bldumper_code.bin
+ 
+ # Copies go next to the make_*.py scripts, which is where they look for them.
+ flasher_code.bin: $(BUILD)/flasher.elf
+@@ -32,11 +33,19 @@ savewriter_code.bin: $(BUILD)/savewriter.elf
+ 	$(OBJCOPY) -O binary $< $@
+ 	cp $@ ../savewriter_code.bin
+ 
++bldumper_code.bin: $(BUILD)/bldumper.elf
++	$(OBJCOPY) -O binary $< $@
++	@test $$(stat -c %s $@) -le 126976 || (echo "bldumper_code.bin overlaps the receive buffer" && rm $@ && false)
++	cp $@ ../bldumper_code.bin
++
+ $(BUILD)/flasher.elf: $(BUILD)/main.o $(COMMON) flasher.ld
+ 	$(LD) -T flasher.ld -Map $(BUILD)/flasher.map -o $@ $(BUILD)/crt0.o $(BUILD)/hash.o $(BUILD)/main.o $(BUILD)/console.o $(BUILD)/cfi.o $(BUILD)/repro_cart.o $(LIBS)
+ 
+-$(BUILD)/savewriter.elf: $(BUILD)/savewriter.o $(COMMON) flasher.ld
+-	$(LD) -T flasher.ld -Map $(BUILD)/savewriter.map -o $@ $(BUILD)/crt0.o $(BUILD)/hash.o $(BUILD)/savewriter.o $(BUILD)/console.o $(BUILD)/cfi.o $(BUILD)/repro_cart.o $(LIBS)
++$(BUILD)/savewriter.elf: $(BUILD)/savewriter.o $(BUILD)/savecore.o $(COMMON) flasher.ld
++	$(LD) -T flasher.ld -Map $(BUILD)/savewriter.map -o $@ $(BUILD)/crt0.o $(BUILD)/hash.o $(BUILD)/savewriter.o $(BUILD)/savecore.o $(BUILD)/console.o $(BUILD)/cfi.o $(BUILD)/repro_cart.o $(LIBS)
++
++$(BUILD)/bldumper.elf: $(BUILD)/bldumper.o $(BUILD)/savecore.o $(BUILD)/bios.o $(COMMON) flasher.ld
++	$(LD) -T flasher.ld -Map $(BUILD)/bldumper.map -o $@ $(BUILD)/crt0.o $(BUILD)/hash.o $(BUILD)/bldumper.o $(BUILD)/savecore.o $(BUILD)/bios.o $(BUILD)/console.o $(BUILD)/cfi.o $(BUILD)/repro_cart.o $(LIBS)
+ 
+ $(BUILD)/%.o: %.s | $(BUILD)
+ 	$(AS) $(ASFLAGS) -o $@ $<
+@@ -56,6 +65,6 @@ $(BUILD):
+ 	mkdir -p $@
+ 
+ clean:
+-	rm -rf $(BUILD) flasher_code.bin savewriter_code.bin
++	rm -rf $(BUILD) flasher_code.bin savewriter_code.bin bldumper_code.bin
+ 
+ .PHONY: all clean
+diff --git a/repro_tools/flasher/bios.s b/repro_tools/flasher/bios.s
+new file mode 100644
+index 0000000..f30a2cc
+--- /dev/null
++++ b/repro_tools/flasher/bios.s
+@@ -0,0 +1,11 @@
++@ u32 BiosMidiKey2Freq(u32 wave, u32 key, u32 fine): BIOS call 0x1F, used by
++@ the BIOS dump (it reads BIOS memory while the BIOS code runs).
++
++    .text
++    .thumb
++    .align  2
++    .global BiosMidiKey2Freq
++    .thumb_func
++BiosMidiKey2Freq:
++    swi     0x1F
++    bx      lr
+diff --git a/repro_tools/flasher/bldumper.c b/repro_tools/flasher/bldumper.c
+new file mode 100644
+index 0000000..8c0e66d
+--- /dev/null
++++ b/repro_tools/flasher/bldumper.c
+@@ -0,0 +1,442 @@
++// GBA Link Cable Dumper, batteryless edition: the GBA side.
++//
++// Replaces the GBA program of FIX94's GBA Link Cable Dumper v1.6 (MIT
++// license, gba/source/main.c) and speaks the same protocol, so the Wii side
++// runs unchanged once make_batteryless_dumper.py has put this program into
++// its boot.dol. On batteryless repro carts, which keep the save in ROM flash,
++// the dumper's "backup save" and "restore save" read and write that save area.
++// Game and BIOS dumps work as before. Saves of ordinary carts are not handled
++// (use the original dumper for those).
++//
++// A restore is shown and confirmed here, on the GBA, and goes through the
++// same checks and steps as the save writer (savecore.c): board probe, CFI,
++// then the save area only, erased by commands sent inside it.
++
++#include "repro_types.h"
++#include "gba/io_reg.h"
++#include "console.h"
++#include "config.h"
++#include "savecore.h"
++
++#define VERSION "v0.1"
++
++#define JOYCNT    (*(vu16 *)0x04000140)
++#define JOY_RECV  (*(vu32 *)0x04000150)
++#define JOY_TRANS (*(vu32 *)0x04000154)
++#define JOY_WRITE 2 // the Wii wrote JOY_RECV
++#define JOY_READ  4 // the Wii read JOY_TRANS
++#define JOY_RW    6
++
++#define ROM32(off)    (*(vu32 *)(0x08000000 + (off)))
++#define ROM_ADDR(off) ((const void *)(0x08000000 + (off)))
++
++#define GAME_AREA      0x1000000  // batteryless saves sit in the first 16 MiB
++#define RECEIVE_BUFFER ((u32 *)0x02020000) // a save being restored (128 KiB)
++
++#define GAME_CODE_BPEE 0x45455042
++
++u32 BiosMidiKey2Freq(u32 wave, u32 key, u32 fine);
++
++static u32 sSaveAddr;
++
++static void WaitWrite(void)
++{
++    while (!(JOYCNT & JOY_WRITE))
++        ;
++    JOYCNT = JOY_RW;
++}
++
++static void WaitRead(void)
++{
++    while (!(JOYCNT & JOY_READ))
++        ;
++    JOYCNT = JOY_RW;
++}
++
++// Same as the original: the ROM ends where reads return the open bus
++// pattern (each halfword its own address).
++static s32 GameSize(void)
++{
++    s32 size;
++    u32 j;
++    vu16 *rom;
++
++    if (ROM32(4) != 0x51AEFF24)
++        return -1;
++    for (size = 1 << 20; size < (1 << 25); size <<= 1)
++    {
++        rom = (vu16 *)(0x08000000 + size);
++        for (j = 0; j < 0x1000; j++)
++        {
++            if (rom[j] != j)
++                break;
++        }
++        if (j == 0x1000)
++            break;
++    }
++    return size;
++}
++
++static bool32 SlotComplete(u32 base, u32 slot)
++{
++    u32 i, id, sector;
++    u32 seen = 0;
++    u32 counter = 0;
++
++    for (i = 0; i < SECTORS_PER_SLOT; i++)
++    {
++        sector = base + (slot * SECTORS_PER_SLOT + i) * SECTOR_SIZE;
++        if (ROM32(sector + 0xFF8) != SECTOR_SIGNATURE)
++            return FALSE;
++        id = ROM32(sector + 0xFF4) & 0xFFFF;
++        if (id >= SECTORS_PER_SLOT || (seen & (1 << id)))
++            return FALSE;
++        seen |= 1 << id;
++        if (i == 0)
++            counter = ROM32(sector + 0xFFC);
++        else if (ROM32(sector + 0xFFC) != counter)
++            return FALSE;
++    }
++    return TRUE;
++}
++
++// The batteryless boot code on these carts (the cart's entry point jumps to
++// it) loads the save address as "mov r0, #page; lsl r0, r0, #16" between
++// selecting SRAM bank 0 and copying the save to SRAM. This finds the save
++// area even when an interrupted write left no valid save in it.
++static const u32 sBootCode[8] =
++{
++    0xE3A00409, // mov r0, #0x09000000
++    0xE3A01000, // mov r1, #0
++    0xE5C01000, // strb r1, [r0]
++    0xE3A00000, // mov r0, #page
++    0xE1A00800, // lsl r0, r0, #16
++    0xE3A01302, // mov r1, #0x08000000
++    0xE1800001, // orr r0, r0, r1
++    0xE3A0140E, // mov r1, #0x0E000000
++};
++
++static bool32 SaveFromBootCode(u32 *addr)
++{
++    u32 entry = ROM32(0);
++    u32 code, off, i, w;
++
++    if ((entry & 0xFF800000) != 0xEA000000) // forward branch
++        return FALSE;
++    code = 8 + ((entry & 0x007FFFFF) << 2);
++    if (code + 0x1000 > GAME_AREA)
++        return FALSE;
++    for (off = code; off < code + 0x1000; off += 4)
++    {
++        for (i = 0; i < 8; i++)
++        {
++            w = ROM32(off + i * 4);
++            if (i == 3 ? (w & 0xFFFFFF00) != sBootCode[3] : w != sBootCode[i])
++                break;
++        }
++        if (i == 8)
++        {
++            *addr = (ROM32(off + 12) & 0xFF) << 16;
++            return *addr != 0 && *addr + SAVE_SIZE <= GAME_AREA;
++        }
++    }
++    return FALSE;
++}
++
++// Otherwise the save is found by its contents: a 128 KiB area, 64 KiB
++// aligned, holding at least one complete save slot. There must be one only.
++static bool32 FindSave(s32 gameSize, bool32 *valid)
++{
++    u32 limit = (u32)gameSize < GAME_AREA ? (u32)gameSize : GAME_AREA;
++    u32 base, addr;
++    u32 found = 0;
++
++    if (SaveFromBootCode(&addr))
++    {
++        sSaveAddr = addr;
++        *valid = SlotComplete(addr, 0) || SlotComplete(addr, 1);
++        return TRUE;
++    }
++    for (base = 0; base + SAVE_SIZE <= limit; base += 0x10000)
++    {
++        if (SlotComplete(base, 0) || SlotComplete(base, 1))
++        {
++            sSaveAddr = base;
++            found++;
++        }
++    }
++    *valid = TRUE;
++    return found == 1;
++}
++
++static bool32 Confirm(void)
++{
++    u16 keys;
++    u16 prev = 0;
++
++    while (ReadKeys())
++        WaitVBlank();
++    for (;;)
++    {
++        WaitVBlank();
++        keys = ReadKeys();
++        if ((keys & (KEY_L | KEY_R)) == (KEY_L | KEY_R) && (keys & KEY_A) && !(prev & KEY_A))
++            return TRUE;
++        if ((keys & KEY_B) && !(prev & KEY_B))
++            return FALSE;
++        prev = keys;
++    }
++}
++
++static bool32 RetryOrStop(void)
++{
++    u16 keys;
++
++    while (ReadKeys())
++        WaitVBlank();
++    for (;;)
++    {
++        WaitVBlank();
++        keys = ReadKeys();
++        if (keys & KEY_A)
++            return TRUE;
++        if (keys & KEY_B)
++            return FALSE;
++    }
++}
++
++static void Say(u32 color, const char *msg)
++{
++    Con_SetColor(color);
++    Con_Print(msg);
++    Con_SetColor(COLOR_WHITE);
++}
++
++static void RestoreSave(void)
++{
++    struct SaveInfo cartInfo, newInfo;
++    const u8 *save = (const u8 *)RECEIVE_BUFFER;
++    bool32 emerald = ROM32(0xAC) == GAME_CODE_BPEE;
++    const char *refusal;
++    u16 rc;
++
++    ReadSaveInfo(save, &newInfo, emerald);
++    if (!newInfo.valid)
++    {
++        Say(COLOR_RED, emerald ? "The file is not a valid\nEmerald save. Nothing was\nwritten.\n"
++                               : "The file is not a valid\nsave. Nothing was written.\n");
++        return;
++    }
++    ReadSaveInfo(ROM_ADDR(sSaveAddr), &cartInfo, emerald);
++    PrintSaveInfo("On the cart:", &cartInfo);
++    PrintSaveInfo("From the SD card:", &newInfo);
++
++    refusal = ProbeChip();
++    if (refusal)
++    {
++        Say(COLOR_RED, refusal);
++        return;
++    }
++    if (SaveWritten(save, sSaveAddr))
++    {
++        Say(COLOR_GREEN, "The cart already holds this\nsave. Nothing to do.\n");
++        return;
++    }
++    Con_Print("Will rewrite ");
++    Con_Hex(sSaveAddr, 6);
++    Con_Putc('-');
++    Con_Hex(sSaveAddr + SAVE_SIZE - 1, 6);
++    Con_Putc('\n');
++    Say(COLOR_YELLOW, "The cart's save will be\nreplaced. Keep the GBA on.\nTo write, hold L+R, press A.\nTo cancel, press B.\n");
++    if (!Confirm())
++    {
++        Say(COLOR_YELLOW, "Cancelled. Nothing was\nwritten.\n");
++        return;
++    }
++
++    for (;;)
++    {
++        rc = WriteSave(save, sSaveAddr);
++        if (rc == REPRO_OK)
++            break;
++        PrintError(rc);
++        Con_Print("A: try again. B: stop (the\nsave may be incomplete).\n");
++        if (!RetryOrStop())
++        {
++            Say(COLOR_RED, "Stopped. Restore again\nbefore playing.\n");
++            return;
++        }
++    }
++    Say(COLOR_GREEN, "Save written.\n");
++}
++
++static void Session(void)
++{
++    s32 gameSize = GameSize();
++    u32 saveSize = 0;
++    u32 choice, i;
++    bool32 valid = FALSE;
++
++    if (gameSize > 0 && FindSave(gameSize, &valid))
++        saveSize = SAVE_SIZE;
++
++    // Both sizes are ready before the handshake: the Wii reads each one
++    // right after acknowledging the previous one.
++    JOY_TRANS = gameSize;
++    WaitWrite();
++    JOY_TRANS = saveSize;
++    WaitWrite();
++    if (gameSize == -1)
++    {
++        Con_Print("No cart found.\n");
++        return;
++    }
++    for (i = 0; i < 0xC0; i += 4)
++    {
++        JOY_TRANS = ROM32(i);
++        WaitRead();
++    }
++    JOY_TRANS = 0;
++
++    // The Wii now waits for a button press, so there is time to print.
++    Con_Print("\nCart ");
++    for (i = 0; i < 4; i++)
++        Con_Putc(((const vu8 *)0x080000AC)[i]);
++    Con_Print(", ");
++    Con_Dec(gameSize >> 20);
++    Con_Print(" MB\n");
++    if (saveSize)
++    {
++        Con_Print("Batteryless save at ");
++        Con_Hex(sSaveAddr, 6);
++        Con_Putc('\n');
++        if (!valid)
++            Say(COLOR_YELLOW, "It holds no valid save: an\nearlier write may have been\ncut off. Restore a save.\n");
++    }
++    else
++    {
++        Con_Print("No batteryless save found.\nFor saves on normal carts,\nuse the original dumper.\n");
++    }
++
++    WaitWrite();
++    choice = JOY_RECV;
++    if (choice == 1)
++    {
++        Con_Print("Dumping the game\n");
++        for (i = 0; i < (u32)gameSize; i += 4)
++        {
++            JOY_TRANS = ROM32(i);
++            if ((i & 0xFFFF) == 0)
++            {
++                Con_ClearLine();
++                Con_Bar(i >> 16, (u32)gameSize >> 16);
++            }
++            WaitRead();
++        }
++        Con_ClearLine();
++        Con_Print("Game dumped.\n");
++    }
++    else if (choice == 2 && saveSize)
++    {
++        struct SaveInfo info;
++
++        ReadSaveInfo(ROM_ADDR(sSaveAddr), &info, ROM32(0xAC) == GAME_CODE_BPEE);
++        PrintSaveInfo("Backing up:", &info);
++        JOY_TRANS = saveSize;
++        WaitWrite();
++        for (i = 0; i < saveSize; i += 4)
++        {
++            JOY_TRANS = ROM32(sSaveAddr + i);
++            if ((i & 0xFFF) == 0)
++            {
++                Con_ClearLine();
++                Con_Bar(i, saveSize);
++            }
++            WaitRead();
++        }
++        Con_ClearLine();
++        Say(COLOR_GREEN, "Save sent.\n");
++    }
++    else if (choice == 3 && saveSize)
++    {
++        JOY_TRANS = saveSize;
++        Con_Print("Receiving a save\n");
++        for (i = 0; i < saveSize; i += 4)
++        {
++            WaitWrite();
++            RECEIVE_BUFFER[i / 4] = JOY_RECV;
++        }
++        RestoreSave();
++        JOY_TRANS = 0;
++        WaitWrite();
++        Con_Print("(The TV says \"restored\" in\nany case: this screen tells.)\n");
++    }
++    else if (choice == 4 && saveSize)
++    {
++        // Let the Wii see the size once, as it expects, then report done.
++        JOY_TRANS = saveSize;
++        WaitRead();
++        Say(COLOR_YELLOW, "Clearing is not supported\nhere. Nothing was changed.\n");
++        JOY_TRANS = 0;
++        WaitWrite();
++    }
++}
++
++static u32 BiosWord(u32 i)
++{
++    u32 a = BiosMidiKey2Freq(i - 4, 180 - 12, 0) * 2;
++    u32 b = BiosMidiKey2Freq(i - 3, 180 - 12, 0) * 2;
++    u32 c = BiosMidiKey2Freq(i - 2, 180 - 12, 0) * 2;
++    u32 d = BiosMidiKey2Freq(i - 1, 180 - 12, 0) * 2;
++
++    return (a >> 24 << 24) | (d >> 24 << 16) | (c >> 24 << 8) | (b >> 24);
++}
++
++// The original's BIOS dump (by Dark Fader). The next word is worked out
++// while the Wii reads the current one.
++static void DumpBios(void)
++{
++    u32 i;
++    u32 next = BiosWord(0);
++
++    Con_Print("Dumping the BIOS\n");
++    for (i = 0; i < 0x4000; i += 4)
++    {
++        JOY_TRANS = next;
++        if (i + 4 < 0x4000)
++            next = BiosWord(i + 4);
++        WaitRead();
++    }
++    Con_Print("BIOS dumped.\n");
++}
++
++void AgbMain(void)
++{
++    u16 flags;
++
++    REG_WAITCNT = 0x4014; // ROM 3/1 wait states, SRAM 4, as Emerald uses
++    Con_Init();
++    Say(COLOR_YELLOW, "GBA Link Cable Dumper\nbatteryless edition " VERSION "\n\n");
++    Con_Print("Choose what to do on the TV.\nA save restore is confirmed\nhere, on the GBA.\n");
++    SaveCore_Init();
++
++    JOY_TRANS = 0;
++    JOYCNT = JOY_RW; // clear anything left from the transfer
++    for (;;)
++    {
++        flags = JOYCNT;
++        if (flags & JOY_READ)
++        {
++            JOYCNT = JOY_RW;
++            Session();
++            JOY_TRANS = 0;
++        }
++        else if (flags & JOY_WRITE)
++        {
++            JOYCNT = JOY_RW;
++            if (JOY_RECV == 5)
++                DumpBios();
++            JOY_TRANS = 0;
++        }
++    }
++}
+diff --git a/repro_tools/flasher/savecore.c b/repro_tools/flasher/savecore.c
+new file mode 100644
+index 0000000..54f87fb
+--- /dev/null
++++ b/repro_tools/flasher/savecore.c
+@@ -0,0 +1,503 @@
++// Save area writing shared by the save writer and the batteryless dumper.
++// The chip and SRAM steps are those of the flasher (main.c), which worked on
++// a real cart; they are repeated here so that the shipped flasher stays as
++// tested.
++
++#include "repro_types.h"
++#include "repro_hw.h"
++#include "repro_cart.h"
++#include "gba/io_reg.h"
++#include "console.h"
++#include "cfi.h"
++#include "config.h"
++#include "savecore.h"
++
++#define ROM8(off)     (*(vu8 *)(0x08000000 + (off)))
++#define ROM_ADDR(off) ((const void *)(0x08000000 + (off)))
++
++#define PIECE_MAX 0x10000 // one SRAM bank of data per program pass
++
++u32 HashWords(const void *src, u32 bytes, u32 h);
++
++// HashWords is ARM code in IWRAM, out of BL range: call it through a pointer.
++u32 (*gHashWords)(const void *src, u32 bytes, u32 h) = HashWords;
++
++struct ReproCart gCart;
++struct CfiInfo gCfi;
++u32 gBlock;
++u32 gFFHash;
++u32 gErrorAddr;
++bool8 gWriteStarted;
++
++static u32 sProgDone;
++static const u8 *sSave;
++static u32 sSaveAddr;
++
++static const char *const sTypeNames[] =
++{
++    [REPRO_CART_UNKNOWN]        = "unknown",
++    [REPRO_CART_INTEL_BUFFERED] = "Intel, buffered",
++    [REPRO_CART_INTEL_WORD]     = "Intel, word",
++    [REPRO_CART_AMD_SWAPPED]    = "AMD x16, D0/D1 swap",
++    [REPRO_CART_AMD_DUAL]       = "AMD, two x8 chips",
++    [REPRO_CART_AMD_X16]        = "AMD x16 (no support)",
++};
++
++// Bytes covered by each sector's checksum in Emerald, by sector id.
++static const u16 sEmeraldSizes[SECTORS_PER_SLOT] =
++{
++    0xF2C, 0xF80, 0xF80, 0xF80, 0xF08, 0xF80, 0xF80, 0xF80, 0xF80, 0xF80, 0xF80, 0xF80, 0xF80, 0x7D0,
++};
++
++// ---------------------------------------------------------------- system
++
++void WaitVBlank(void)
++{
++    while (REG_VCOUNT >= 160)
++        ;
++    while (REG_VCOUNT < 160)
++        ;
++}
++
++void WaitFrames(u32 frames)
++{
++    while (frames--)
++        WaitVBlank();
++}
++
++u16 ReadKeys(void)
++{
++    return ~REG_KEYINPUT & 0x3FF;
++}
++
++void ErrorWait(u32 code)
++{
++    while (ReadKeys())
++        WaitVBlank();
++    while (!(ReadKeys() & KEY_A))
++        WaitVBlank();
++}
++
++void PrintOk(void)
++{
++    Con_SetColor(COLOR_GREEN);
++    Con_Print(" ok\n");
++    Con_SetColor(COLOR_WHITE);
++}
++
++void PrintDecPadded(u32 value, u32 digits)
++{
++    static const u32 powers[] = {10000, 1000, 100, 10, 1};
++    u32 i, digit;
++
++    for (i = 5 - digits; i < 5; i++)
++    {
++        digit = 0;
++        while (value >= powers[i])
++        {
++            value -= powers[i];
++            digit++;
++        }
++        Con_Putc('0' + digit);
++    }
++}
++
++// ---------------------------------------------------------------- hashing
++
++u32 ChunkHash(u32 off)
++{
++    return gHashWords(ROM_ADDR(off), HASH_CHUNK, HASH_BASIS);
++}
++
++void SaveCore_Init(void)
++{
++    static const u32 ones[8] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
++    u32 h = HASH_BASIS;
++    u32 i;
++
++    for (i = 0; i < HASH_CHUNK; i += sizeof(ones))
++        h = gHashWords(ones, sizeof(ones), h);
++    gFFHash = h;
++}
++
++bool32 IsErased(u32 addr, u32 len)
++{
++    u32 i;
++
++    for (i = 0; i < len; i += HASH_CHUNK)
++    {
++        if (ChunkHash(addr + i) != gFFHash)
++            return FALSE;
++    }
++    return TRUE;
++}
++
++// ---------------------------------------------------------------- chip
++
++// Raw answers to the probe's own ID queries, for chips it did not recognise.
++static void ShowChipIds(void)
++{
++    u16 ime;
++    u16 header1 = ROM_READ16(2);
++    u16 id0, id1;
++
++    IRQ_DISABLE(ime);
++    ROM_WRITE16(0, 0xFF);
++    ROM_WRITE16(0, 0x50);
++    ROM_WRITE16(0, 0x90);
++    id0 = ROM_READ16(0);
++    id1 = ROM_READ16(2);
++    ROM_WRITE16(0, 0xFF);
++    Con_Print("Intel ID ");
++    Con_Hex(id0, 4);
++    Con_Putc(' ');
++    Con_Hex(id1, 4);
++    Con_Putc('\n');
++    if (id1 == header1)
++    {
++        ROM_WRITE16(0, 0xF0);
++        ROM_WRITE16(0xAAA, 0xA9);
++        ROM_WRITE16(0x554, 0x56);
++        ROM_WRITE16(0xAAA, 0x90);
++        id0 = ROM_READ16(0);
++        id1 = ROM_READ16(2);
++        ROM_WRITE16(0, 0xF0);
++        Con_Print("AMD ID ");
++        Con_Hex(id0, 4);
++        Con_Putc(' ');
++        Con_Hex(id1, 4);
++        Con_Putc('\n');
++    }
++    ROM_WRITE16(0, 0xF0F0);
++    ROM_WRITE16(0, 0xFFFF);
++    IRQ_RESTORE(ime);
++}
++
++const char *ProbeChip(void)
++{
++    const struct ReproCart *probed = ReproCart_Probe();
++    u32 i;
++
++    for (i = 0; i < sizeof(gCart); i++)
++        ((u8 *)&gCart)[i] = ((const u8 *)probed)[i];
++    Con_Print("Chip: ");
++    Con_Print(sTypeNames[gCart.type]);
++    Con_Putc('\n');
++    if (!gCart.supported)
++    {
++        if (gCart.type == REPRO_CART_UNKNOWN)
++            ShowChipIds();
++        return "This board type is not\nsupported. Nothing was\nwritten.\n";
++    }
++    if (!Cfi_Read(&gCart, &gCfi))
++    {
++        Con_Print("CFI: no answer (");
++        Con_Hex(gCfi.raw[0], 2);
++        Con_Hex(gCfi.raw[1], 2);
++        Con_Hex(gCfi.raw[2], 2);
++        Con_Print(")\n");
++        return "Can't read the chip's block\nlayout. Nothing was written.\n";
++    }
++    gBlock = gCfi.blockSize;
++    Con_Print("Blocks: ");
++    Con_Dec(gBlock / 1024);
++    Con_Print(" KB, chip ");
++    Con_Dec(gCfi.busSize >> 20);
++    Con_Print(" MB\n");
++    if (gBlock < MIN_BLOCK || gBlock > MAX_BLOCK || (gBlock & (gBlock - 1)) || gCfi.busSize < 0x1000000)
++        return "This block layout is not\nsupported. Nothing was\nwritten.\n";
++    return NULL;
++}
++
++// ---------------------------------------------------------------- save area
++//
++// Only the save area is ever erased, and only by erase commands sent to
++// addresses inside it. The cart's own save routine sends its erase commands
++// there too, every time the game saves, so whatever shares an erase block
++// with the save cannot hold anything the cart needs, whatever the real block
++// size. If blocks are smaller than the chip reports, parts of the area stay
++// unerased after the first pass; those are found and erased in a second pass.
++// Everything is erased before anything is programmed, so blocks larger than
++// reported cannot wipe data already written.
++
++bool32 SaveWritten(const u8 *save, u32 saveAddr)
++{
++    u32 i;
++
++    for (i = 0; i < SAVE_SIZE; i += HASH_CHUNK)
++    {
++        if (ChunkHash(saveAddr + i) != gHashWords(save + i, HASH_CHUNK, HASH_BASIS))
++            return FALSE;
++    }
++    return TRUE;
++}
++
++static u16 FillSram(u32 addr, u32 len)
++{
++    u32 i;
++
++    for (i = 0; i < len; i++)
++        ReproSram_Write8(i, sSave[addr + i - sSaveAddr], gCart.bankValue);
++    for (i = 0; i < len; i++)
++    {
++        if (ReproSram_Read8(i, gCart.bankValue) != sSave[addr + i - sSaveAddr])
++        {
++            gErrorAddr = addr + i;
++            return REPRO_ERR_SRAM;
++        }
++    }
++    return REPRO_OK;
++}
++
++static u16 ProgramFromSram(u32 dst, u32 len)
++{
++    u32 unit = gCart.programUnit;
++    u32 off, i;
++    u16 rc;
++
++    for (off = 0; off < len; off += unit)
++    {
++        if ((off & 0xFFF) == 0)
++            Con_Bar(sProgDone + off, SAVE_SIZE);
++        for (i = 0; i < unit; i++)
++        {
++            if (ReproSram_Read8(off + i, gCart.bankValue) != 0xFF)
++                break;
++        }
++        if (i == unit)
++            continue; // already the erased state
++        rc = ReproCart_ProgramUnit(&gCart, dst + off, off);
++        if (rc != REPRO_OK)
++        {
++            gErrorAddr = dst + off;
++            return rc;
++        }
++    }
++    sProgDone += len;
++    return REPRO_OK;
++}
++
++static u16 Erase(u32 addr)
++{
++    u16 rc;
++
++    gErrorAddr = addr;
++    rc = ReproCart_EraseBlock(&gCart, addr);
++    if (rc != REPRO_OK)
++        rc = ReproCart_EraseBlock(&gCart, addr);
++    return rc;
++}
++
++static u16 EraseSaveArea(void)
++{
++    u32 step = gBlock < SAVE_SIZE ? gBlock : SAVE_SIZE;
++    u32 i;
++    u16 rc;
++
++    for (i = 0; i < SAVE_SIZE; i += step)
++    {
++        rc = Erase(sSaveAddr + i);
++        if (rc != REPRO_OK)
++            return rc;
++    }
++    for (i = 0; i < SAVE_SIZE; i += HASH_CHUNK)
++    {
++        if (ChunkHash(sSaveAddr + i) != gFFHash)
++        {
++            rc = Erase(sSaveAddr + i);
++            if (rc != REPRO_OK)
++                return rc;
++        }
++    }
++    gErrorAddr = sSaveAddr;
++    return IsErased(sSaveAddr, SAVE_SIZE) ? REPRO_OK : REPRO_ERR_VERIFY;
++}
++
++static u16 WriteOnce(void)
++{
++    u32 p;
++    u16 rc;
++
++    Con_ClearLine();
++    Con_Print("Erasing ");
++    Con_Hex(sSaveAddr, 6);
++    gWriteStarted = TRUE;
++    rc = EraseSaveArea();
++    if (rc != REPRO_OK)
++        return rc;
++    PrintOk();
++    Con_Print("Writing ");
++    sProgDone = 0;
++    for (p = 0; p < SAVE_SIZE && rc == REPRO_OK; p += PIECE_MAX)
++    {
++        rc = FillSram(sSaveAddr + p, PIECE_MAX);
++        if (rc == REPRO_OK)
++            rc = ProgramFromSram(sSaveAddr + p, PIECE_MAX);
++    }
++    if (rc != REPRO_OK)
++        return rc;
++    gErrorAddr = sSaveAddr;
++    if (!SaveWritten(sSave, sSaveAddr))
++        return ERR_WRITE_VERIFY;
++    Con_ClearLine();
++    Con_Print("Writing ");
++    Con_Hex(sSaveAddr, 6);
++    PrintOk();
++    return REPRO_OK;
++}
++
++u16 WriteSave(const u8 *save, u32 saveAddr)
++{
++    u16 rc;
++
++    sSave = save;
++    sSaveAddr = saveAddr;
++    ReproSram_ForgetBank();
++    rc = WriteOnce();
++    if (rc != REPRO_OK)
++    {
++        Con_Putc('\n');
++        rc = WriteOnce();
++    }
++    return rc;
++}
++
++// ---------------------------------------------------------------- save info
++
++static u32 Get32(const u8 *p)
++{
++    return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
++}
++
++static u16 Get16(const u8 *p)
++{
++    return p[0] | (p[1] << 8);
++}
++
++static bool32 ChecksumOk(const u8 *sector, u32 id)
++{
++    u32 sum = 0;
++    u32 i;
++
++    for (i = 0; i < sEmeraldSizes[id]; i += 4)
++        sum += Get32(sector + i);
++    return (u16)((sum >> 16) + sum) == Get16(sector + 0xFF6);
++}
++
++// The slot the game loads: 14 signed sectors with ids 0-13 and one save
++// count (and, for Emerald, valid checksums), the higher count winning.
++void ReadSaveInfo(const u8 *save, struct SaveInfo *info, bool32 emeraldChecksums)
++{
++    u32 slot, i, id, seen, counter;
++    const u8 *sector;
++    const u8 *sb2;
++
++    info->valid = FALSE;
++    for (slot = 0; slot < 2; slot++)
++    {
++        seen = 0;
++        counter = 0;
++        sb2 = save;
++        for (i = 0; i < SECTORS_PER_SLOT; i++)
++        {
++            sector = save + (slot * SECTORS_PER_SLOT + i) * SECTOR_SIZE;
++            id = Get16(sector + 0xFF4);
++            if (Get32(sector + 0xFF8) != SECTOR_SIGNATURE || id >= SECTORS_PER_SLOT || (seen & (1 << id)))
++                break;
++            if (emeraldChecksums && !ChecksumOk(sector, id))
++                break;
++            if (i == 0)
++                counter = Get32(sector + 0xFFC);
++            else if (Get32(sector + 0xFFC) != counter)
++                break;
++            seen |= 1 << id;
++            if (id == 0)
++                sb2 = sector;
++        }
++        if (i < SECTORS_PER_SLOT || (info->valid && counter <= info->counter))
++            continue;
++        info->valid = TRUE;
++        info->counter = counter;
++        for (i = 0; i < 7; i++)
++            info->name[i] = sb2[i];
++        info->name[7] = 0xFF;
++        info->trainerId = Get16(sb2 + 0x0A);
++        info->hours = Get16(sb2 + 0x0E);
++        info->minutes = sb2[0x10];
++    }
++}
++
++static u32 GameChar(u8 c)
++{
++    if (c >= 0xBB && c <= 0xD4)
++        return 'A' + (c - 0xBB);
++    if (c >= 0xD5 && c <= 0xEE)
++        return 'a' + (c - 0xD5);
++    if (c >= 0xA1 && c <= 0xAA)
++        return '0' + (c - 0xA1);
++    switch (c)
++    {
++    case 0x00: return ' ';
++    case 0xAB: return '!';
++    case 0xAC: return '?';
++    case 0xAD: return '.';
++    case 0xAE: return '-';
++    case 0xB8: return ',';
++    case 0xBA: return '/';
++    }
++    return '?';
++}
++
++void PrintSaveInfo(const char *label, const struct SaveInfo *info)
++{
++    u32 i;
++
++    Con_Print(label);
++    if (!info->valid)
++    {
++        Con_Print(" none\n");
++        return;
++    }
++    Con_Print("\n  ");
++    for (i = 0; i < 7 && info->name[i] != 0xFF; i++)
++        Con_Putc(GameChar(info->name[i]));
++    for (; i < 8; i++)
++        Con_Putc(' ');
++    Con_Print("ID ");
++    PrintDecPadded(info->trainerId, 5);
++    Con_Print("  ");
++    Con_Dec(info->hours);
++    Con_Putc(':');
++    PrintDecPadded(info->minutes < 60 ? info->minutes : 0, 2);
++    Con_Putc('\n');
++}
++
++// ---------------------------------------------------------------- errors
++
++static const char *ErrorText(u16 rc)
++{
++    switch (rc)
++    {
++    case REPRO_ERR_TIMEOUT:  return "The chip did not finish.";
++    case REPRO_ERR_STATUS:   return "The chip reported a failure.";
++    case REPRO_ERR_VERIFY:   return "Data read back wrong.";
++    case REPRO_ERR_SRAM:     return "Cart SRAM read back wrong.";
++    case REPRO_ERR_LOCKED:   return "A block stayed locked.";
++    case ERR_WRITE_VERIFY:   return "The save read back wrong.";
++    }
++    return "Unknown error.";
++}
++
++void PrintError(u16 rc)
++{
++    Con_Putc('\n');
++    Con_SetColor(COLOR_RED);
++    Con_Print("Error ");
++    Con_Hex(rc, 4);
++    Con_Print(" at ");
++    Con_Hex(gErrorAddr, 6);
++    Con_Putc('\n');
++    Con_Print(ErrorText(rc));
++    Con_Putc('\n');
++    Con_SetColor(COLOR_WHITE);
++}
+diff --git a/repro_tools/flasher/savecore.h b/repro_tools/flasher/savecore.h
+new file mode 100644
+index 0000000..5c884bf
+--- /dev/null
++++ b/repro_tools/flasher/savecore.h
+@@ -0,0 +1,71 @@
++#ifndef GUARD_SAVECORE_H
++#define GUARD_SAVECORE_H
++
++// Save area writing shared by the save writer (savewriter.c) and the
++// batteryless dumper (bldumper.c): board probe, CFI, writing the save area
++// from a RAM copy through the cart's SRAM, and the save summary on screen.
++
++#include "repro_cart.h"
++#include "cfi.h"
++
++#define SAVE_SIZE        0x20000
++#define SECTOR_SIZE      0x1000
++#define SECTORS_PER_SLOT 14
++#define SECTOR_SIGNATURE 0x08012025
++#define MIN_BLOCK        0x1000
++#define MAX_BLOCK        0x40000
++
++#define KEY_A 0x0001
++#define KEY_B 0x0002
++#define KEY_R 0x0100
++#define KEY_L 0x0200
++
++// Errors of these programs; the chip layer uses 0x81xx (repro_cart.h).
++#define ERR_WRITE_VERIFY  0x8204
++
++struct SaveInfo
++{
++    bool8 valid;
++    u8 name[8];
++    u16 trainerId;
++    u16 hours;
++    u8 minutes;
++    u32 counter;
++};
++
++extern u32 (*gHashWords)(const void *src, u32 bytes, u32 h);
++extern struct ReproCart gCart;
++extern struct CfiInfo gCfi;
++extern u32 gBlock;
++extern u32 gFFHash;
++extern u32 gErrorAddr;
++extern bool8 gWriteStarted;
++
++// The test harness replaces these three.
++void WaitVBlank(void);
++u16 ReadKeys(void);
++void ErrorWait(u32 code);
++
++void WaitFrames(u32 frames);
++void PrintOk(void);
++void PrintDecPadded(u32 value, u32 digits);
++
++void SaveCore_Init(void);
++u32 ChunkHash(u32 off);
++bool32 IsErased(u32 addr, u32 len);
++
++// Probes the board and reads its CFI table, printing what it finds. Returns
++// NULL when writing is possible, else the reason it is not.
++const char *ProbeChip(void);
++
++// Whether the 128 KiB save area at saveAddr already holds 'save'.
++bool32 SaveWritten(const u8 *save, u32 saveAddr);
++// Erases the save area, writes 'save' into it and checks it (one retry).
++u16 WriteSave(const u8 *save, u32 saveAddr);
++
++void ReadSaveInfo(const u8 *save, struct SaveInfo *info, bool32 emeraldChecksums);
++void PrintSaveInfo(const char *label, const struct SaveInfo *info);
++
++void PrintError(u16 rc);
++
++#endif // GUARD_SAVECORE_H
+diff --git a/repro_tools/flasher/savewriter.c b/repro_tools/flasher/savewriter.c
+index ca677fc..b305c65 100644
+--- a/repro_tools/flasher/savewriter.c
++++ b/repro_tools/flasher/savewriter.c
+@@ -6,108 +6,28 @@
+ // from the user's dump and the save file, typically one that extract_save.py
+ // pulled out of a dump and PKHeX edited.
+ //
+-// The same safety design as the flasher (main.c), whose helpers are repeated
+-// here so that the shipped flasher stays exactly as tested:
++// Safety design:
+ //  - nothing is written until the cart matches the dump outside the areas that
+ //    legitimately change, and the user confirms with L+R+A;
+-//  - the erase block size comes from CFI and is checked by experiment in an
+-//    area that is unused in the dump, before the save area is erased;
++//  - only the save area is erased, by commands sent inside it, as the cart's
++//    own save routine does (see savecore.c);
+ //  - the image carries the whole save, so if power is lost while writing,
+-//    sending it again finishes the job;
+-//  - only the save area (rounded out to the erase block, where the dump holds
+-//    0xFF) and the unused test area are ever written.
++//    sending it again finishes the job.
+ 
+ #include "repro_types.h"
+-#include "repro_hw.h"
+-#include "repro_cart.h"
+ #include "gba/io_reg.h"
+ #include "console.h"
+-#include "cfi.h"
+ #include "config.h"
++#include "savecore.h"
+ #include "savewriter_config.h"
+ 
+ #define VERSION "v0.1"
+-
+-#define ROM8(off)     (*(vu8 *)(0x08000000 + (off)))
+ #define ROM_ADDR(off) ((const void *)(0x08000000 + (off)))
+ 
+-#define KEY_A 0x0001
+-#define KEY_R 0x0100
+-#define KEY_L 0x0200
+-
+-#define MIN_BLOCK 0x1000
+-#define MAX_BLOCK 0x40000
+-#define PIECE_MAX 0x10000 // one SRAM bank of data per program pass
+-
+-#define SECTOR_SIZE      0x1000
+-#define SECTORS_PER_SLOT 14
+-#define SECTOR_SIGNATURE 0x08012025
+-
+-// Errors of this program; the chip layer uses 0x81xx (repro_cart.h).
+-#define ERR_BLOCK_SMALLER 0x8201
+-#define ERR_BLOCK_LARGER  0x8202
+-#define ERR_WRITE_VERIFY  0x8204
+-#define ERR_MARK_VERIFY   0x8206
+-#define ERR_SIZE_TEST     0x8207
+-
+-struct SaveInfo
+-{
+-    bool8 valid;
+-    u8 name[8];
+-    u16 trainerId;
+-    u16 hours;
+-    u8 minutes;
+-    u32 counter;
+-};
+-
+ extern u8 __image_end[];
+-u32 HashWords(const void *src, u32 bytes, u32 h);
+-
+-// HashWords is ARM code in IWRAM, out of BL range: call it through a pointer.
+-u32 (*gHashWords)(const void *src, u32 bytes, u32 h) = HashWords;
+ 
+ static const struct SaveWriterConfig *sCfg;
+ static const u8 *sSave;
+-static struct ReproCart sCart;
+-static struct CfiInfo sCfi;
+-static u32 sBlock;
+-static u32 sPiece;
+-static u32 sFFHash;
+-static u32 sErrorAddr;
+-static u32 sProgDone;
+-static u16 sTestError;
+-static bool8 sWriteStarted;
+-
+-static const char *const sTypeNames[] =
+-{
+-    [REPRO_CART_UNKNOWN]        = "unknown",
+-    [REPRO_CART_INTEL_BUFFERED] = "Intel, buffered",
+-    [REPRO_CART_INTEL_WORD]     = "Intel, word",
+-    [REPRO_CART_AMD_SWAPPED]    = "AMD x16, D0/D1 swap",
+-    [REPRO_CART_AMD_DUAL]       = "AMD, two x8 chips",
+-    [REPRO_CART_AMD_X16]        = "AMD x16 (no support)",
+-};
+-
+-// ---------------------------------------------------------------- system
+-
+-void WaitVBlank(void)
+-{
+-    while (REG_VCOUNT >= 160)
+-        ;
+-    while (REG_VCOUNT < 160)
+-        ;
+-}
+-
+-static void WaitFrames(u32 frames)
+-{
+-    while (frames--)
+-        WaitVBlank();
+-}
+-
+-u16 ReadKeys(void)
+-{
+-    return ~REG_KEYINPUT & 0x3FF;
+-}
+ 
+ // The end of every run; the GBA is turned off from here.
+ void Finish(u32 code)
+@@ -124,13 +44,6 @@ static void Fail(const char *msg)
+     Finish(1);
+ }
+ 
+-static void PrintOk(void)
+-{
+-    Con_SetColor(COLOR_GREEN);
+-    Con_Print(" ok\n");
+-    Con_SetColor(COLOR_WHITE);
+-}
+-
+ static void WaitConfirm(void)
+ {
+     u16 keys;
+@@ -149,33 +62,6 @@ static void WaitConfirm(void)
+     }
+ }
+ 
+-void ErrorWait(u32 code)
+-{
+-    while (ReadKeys())
+-        WaitVBlank();
+-    while (!(ReadKeys() & KEY_A))
+-        WaitVBlank();
+-}
+-
+-static void PrintDecPadded(u32 value, u32 digits)
+-{
+-    static const u32 powers[] = {10000, 1000, 100, 10, 1};
+-    u32 i, digit;
+-
+-    for (i = 5 - digits; i < 5; i++)
+-    {
+-        digit = 0;
+-        while (value >= powers[i])
+-        {
+-            value -= powers[i];
+-            digit++;
+-        }
+-        Con_Putc('0' + digit);
+-    }
+-}
+-
+-// ---------------------------------------------------------------- data
+-
+ static bool32 ConfigOk(void)
+ {
+     sCfg = (const struct SaveWriterConfig *)(((u32)__image_end + 31) & ~31);
+@@ -186,7 +72,7 @@ static bool32 ConfigOk(void)
+         return FALSE;
+     if (gHashWords((const u8 *)sCfg + 0x20, sCfg->totalSize - 0x20, HASH_BASIS) != sCfg->bodyHash)
+         return FALSE;
+-    if (sCfg->numIdRanges > MAX_ID_RANGES || sCfg->saveSize != SECTOR_SIZE * 32
++    if (sCfg->numIdRanges > MAX_ID_RANGES || sCfg->saveSize != SAVE_SIZE
+      || sizeof(struct SaveWriterConfig) + sCfg->saveSize > sCfg->totalSize
+      || (sCfg->saveAddr & (SECTOR_SIZE - 1)) || sCfg->areaStart > sCfg->saveAddr
+      || sCfg->areaEnd < sCfg->saveAddr + sCfg->saveSize)
+@@ -195,34 +81,6 @@ static bool32 ConfigOk(void)
+     return TRUE;
+ }
+ 
+-static u32 ChunkHash(u32 off)
+-{
+-    return gHashWords(ROM_ADDR(off), HASH_CHUNK, HASH_BASIS);
+-}
+-
+-static u32 FFHash(void)
+-{
+-    static const u32 ones[8] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
+-    u32 h = HASH_BASIS;
+-    u32 i;
+-
+-    for (i = 0; i < HASH_CHUNK; i += sizeof(ones))
+-        h = gHashWords(ones, sizeof(ones), h);
+-    return h;
+-}
+-
+-static bool32 IsErased(u32 addr, u32 len)
+-{
+-    u32 i;
+-
+-    for (i = 0; i < len; i += HASH_CHUNK)
+-    {
+-        if (ChunkHash(addr + i) != sFFHash)
+-            return FALSE;
+-    }
+-    return TRUE;
+-}
+-
+ static bool32 IdentityOk(void)
+ {
+     u32 h = HASH_BASIS;
+@@ -251,429 +109,10 @@ static void WaitForCart(void)
+     } while (!CartPresent());
+ }
+ 
+-static bool32 InSave(u32 addr)
+-{
+-    return addr >= sCfg->saveAddr && addr < sCfg->saveAddr + sCfg->saveSize;
+-}
+-
+-// What ROM offset 'addr' should hold once written: the new save inside the
+-// save area, the erased state around it.
+-static u8 TargetByte(u32 addr)
+-{
+-    return InSave(addr) ? sSave[addr - sCfg->saveAddr] : 0xFF;
+-}
+-
+-static bool32 BlockIsTarget(u32 x)
+-{
+-    u32 i, want;
+-
+-    for (i = 0; i < sBlock; i += HASH_CHUNK)
+-    {
+-        if (InSave(x + i))
+-            want = gHashWords(sSave + (x + i - sCfg->saveAddr), HASH_CHUNK, HASH_BASIS);
+-        else
+-            want = sFFHash;
+-        if (ChunkHash(x + i) != want)
+-            return FALSE;
+-    }
+-    return TRUE;
+-}
+-
+-// ---------------------------------------------------------------- save info
+-
+-static u32 Get32(const u8 *p)
+-{
+-    return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+-}
+-
+-static u16 Get16(const u8 *p)
+-{
+-    return p[0] | (p[1] << 8);
+-}
+-
+-// The slot Emerald loads: 14 signed sectors with ids 0-13 and one save count,
+-// the higher count winning. Checksums are checked by make_save_writer.py;
+-// this is only for the screen.
+-static void ReadSaveInfo(const u8 *save, struct SaveInfo *info)
+-{
+-    u32 slot, i, id, seen, counter;
+-    const u8 *sector;
+-    const u8 *sb2;
+-
+-    info->valid = FALSE;
+-    for (slot = 0; slot < 2; slot++)
+-    {
+-        seen = 0;
+-        counter = 0;
+-        sb2 = save;
+-        for (i = 0; i < SECTORS_PER_SLOT; i++)
+-        {
+-            sector = save + (slot * SECTORS_PER_SLOT + i) * SECTOR_SIZE;
+-            id = Get16(sector + 0xFF4);
+-            if (Get32(sector + 0xFF8) != SECTOR_SIGNATURE || id >= SECTORS_PER_SLOT || (seen & (1 << id)))
+-                break;
+-            if (i == 0)
+-                counter = Get32(sector + 0xFFC);
+-            else if (Get32(sector + 0xFFC) != counter)
+-                break;
+-            seen |= 1 << id;
+-            if (id == 0)
+-                sb2 = sector;
+-        }
+-        if (i < SECTORS_PER_SLOT || (info->valid && counter <= info->counter))
+-            continue;
+-        info->valid = TRUE;
+-        info->counter = counter;
+-        for (i = 0; i < 7; i++)
+-            info->name[i] = sb2[i];
+-        info->name[7] = 0xFF;
+-        info->trainerId = Get16(sb2 + 0x0A);
+-        info->hours = Get16(sb2 + 0x0E);
+-        info->minutes = sb2[0x10];
+-    }
+-}
+-
+-static u32 GameChar(u8 c)
+-{
+-    if (c >= 0xBB && c <= 0xD4)
+-        return 'A' + (c - 0xBB);
+-    if (c >= 0xD5 && c <= 0xEE)
+-        return 'a' + (c - 0xD5);
+-    if (c >= 0xA1 && c <= 0xAA)
+-        return '0' + (c - 0xA1);
+-    switch (c)
+-    {
+-    case 0x00: return ' ';
+-    case 0xAB: return '!';
+-    case 0xAC: return '?';
+-    case 0xAD: return '.';
+-    case 0xAE: return '-';
+-    case 0xB8: return ',';
+-    case 0xBA: return '/';
+-    }
+-    return '?';
+-}
+-
+-static void PrintSaveInfo(const char *label, const struct SaveInfo *info)
+-{
+-    u32 i;
+-
+-    Con_Print(label);
+-    if (!info->valid)
+-    {
+-        Con_Print(" none\n");
+-        return;
+-    }
+-    Con_Print("\n  ");
+-    for (i = 0; i < 7 && info->name[i] != 0xFF; i++)
+-        Con_Putc(GameChar(info->name[i]));
+-    for (; i < 8; i++)
+-        Con_Putc(' ');
+-    Con_Print("ID ");
+-    PrintDecPadded(info->trainerId, 5);
+-    Con_Print("  ");
+-    Con_Dec(info->hours);
+-    Con_Putc(':');
+-    PrintDecPadded(info->minutes < 60 ? info->minutes : 0, 2);
+-    Con_Putc('\n');
+-}
+-
+-// ---------------------------------------------------------------- flash steps
+-
+-static u16 FillSram(u32 addr, u32 len)
+-{
+-    u32 i;
+-
+-    for (i = 0; i < len; i++)
+-        ReproSram_Write8(i, TargetByte(addr + i), sCart.bankValue);
+-    for (i = 0; i < len; i++)
+-    {
+-        if (ReproSram_Read8(i, sCart.bankValue) != TargetByte(addr + i))
+-        {
+-            sErrorAddr = addr + i;
+-            return REPRO_ERR_SRAM;
+-        }
+-    }
+-    return REPRO_OK;
+-}
+-
+-static u16 ProgramFromSram(u32 dst, u32 len)
+-{
+-    u32 unit = sCart.programUnit;
+-    u32 off, i;
+-    u16 rc;
+-
+-    for (off = 0; off < len; off += unit)
+-    {
+-        if ((off & 0xFFF) == 0)
+-            Con_Bar(sProgDone + off, sBlock);
+-        for (i = 0; i < unit; i++)
+-        {
+-            if (ReproSram_Read8(off + i, sCart.bankValue) != 0xFF)
+-                break;
+-        }
+-        if (i == unit)
+-            continue; // already the erased state
+-        rc = ReproCart_ProgramUnit(&sCart, dst + off, off);
+-        if (rc != REPRO_OK)
+-        {
+-            sErrorAddr = dst + off;
+-            return rc;
+-        }
+-    }
+-    sProgDone += len;
+-    return REPRO_OK;
+-}
+-
+-static u16 EraseChecked(u32 addr)
+-{
+-    u16 rc;
+-
+-    sErrorAddr = addr;
+-    rc = ReproCart_EraseBlock(&sCart, addr);
+-    if (rc != REPRO_OK)
+-        rc = ReproCart_EraseBlock(&sCart, addr);
+-    if (rc == REPRO_OK && !IsErased(addr, sBlock))
+-        rc = REPRO_ERR_VERIFY;
+-    return rc;
+-}
+-
+-static void StepStart(u32 addr, const char *what)
+-{
+-    Con_ClearLine();
+-    Con_Hex(addr, 6);
+-    Con_Print(what);
+-    sProgDone = 0;
+-    Con_Bar(0, sBlock);
+-}
+-
+-static void StepDone(u32 addr, const char *what)
+-{
+-    Con_ClearLine();
+-    Con_Hex(addr, 6);
+-    Con_Print(what);
+-    PrintOk();
+-}
+-
+-static u8 MarkByte(u32 i)
+-{
+-    return 0xA5 ^ i;
+-}
+-
+-static bool32 MarkPresent(u32 addr)
+-{
+-    u32 i;
+-
+-    for (i = 0; i < sCart.programUnit; i++)
+-    {
+-        if (ROM8(addr + i) != MarkByte(i))
+-            return FALSE;
+-    }
+-    return TRUE;
+-}
+-
+-// Checks that one erase command clears exactly sBlock bytes, in the test area
+-// (unused in the dump): a marker goes in the first and last program unit of
+-// the test block and next to it on each side, then the test block is erased.
+-static u16 EraseSizeTest(void)
+-{
+-    u32 t = sCfg->testAddr;
+-    u32 unit = sCart.programUnit;
+-    u32 marks[4];
+-    u32 i;
+-    u16 rc;
+-
+-    marks[0] = t - unit;
+-    marks[1] = t;
+-    marks[2] = t + sBlock - unit;
+-    marks[3] = t + sBlock;
+-
+-    rc = EraseChecked(t - sBlock);
+-    if (rc == REPRO_OK)
+-        rc = EraseChecked(t);
+-    if (rc == REPRO_OK)
+-        rc = EraseChecked(t + sBlock);
+-    if (rc != REPRO_OK)
+-        return rc;
+-
+-    for (i = 0; i < unit; i++)
+-        ReproSram_Write8(i, MarkByte(i), sCart.bankValue);
+-    for (i = 0; i < 4; i++)
+-    {
+-        // A marker that cannot be programmed can mean the blocks are smaller
+-        // than reported (its block was not erased or unlocked). Retrying
+-        // cannot fix that, so stop while only the test area has been written.
+-        sErrorAddr = marks[i];
+-        rc = ReproCart_ProgramUnit(&sCart, marks[i], 0);
+-        if (rc == REPRO_OK && !MarkPresent(marks[i]))
+-            rc = ERR_MARK_VERIFY;
+-        if (rc != REPRO_OK)
+-        {
+-            sTestError = rc;
+-            return ERR_SIZE_TEST;
+-        }
+-    }
+-
+-    sErrorAddr = t;
+-    rc = ReproCart_EraseBlock(&sCart, t);
+-    if (rc != REPRO_OK)
+-        rc = ReproCart_EraseBlock(&sCart, t);
+-    if (rc != REPRO_OK)
+-        return rc;
+-    if (!IsErased(t, sBlock))
+-        return ERR_BLOCK_SMALLER;
+-    if (!MarkPresent(marks[0]) || !MarkPresent(marks[3]))
+-        return ERR_BLOCK_LARGER;
+-    return REPRO_OK;
+-}
+-
+-static bool32 TestAreaClean(void)
+-{
+-    return IsErased(sCfg->testAddr - sBlock, 3 * sBlock);
+-}
+-
+-static u16 CleanTestArea(void)
+-{
+-    u32 b;
+-    u16 rc;
+-
+-    for (b = sCfg->testAddr - sBlock; b < sCfg->testAddr + 2 * sBlock; b += sBlock)
+-    {
+-        if (!IsErased(b, sBlock))
+-        {
+-            rc = EraseChecked(b);
+-            if (rc != REPRO_OK)
+-                return rc;
+-        }
+-    }
+-    return REPRO_OK;
+-}
+-
+-static u16 WriteBlock(u32 x)
+-{
+-    u32 p;
+-    u16 rc;
+-
+-    StepStart(x, " write ");
+-    sWriteStarted = TRUE;
+-    rc = EraseChecked(x);
+-    for (p = 0; p < sBlock && rc == REPRO_OK; p += sPiece)
+-    {
+-        rc = FillSram(x + p, sPiece);
+-        if (rc == REPRO_OK)
+-            rc = ProgramFromSram(x + p, sPiece);
+-    }
+-    if (rc != REPRO_OK)
+-        return rc;
+-    sErrorAddr = x;
+-    if (!BlockIsTarget(x))
+-        return ERR_WRITE_VERIFY;
+-    StepDone(x, " write ");
+-    return REPRO_OK;
+-}
+-
+-static u16 WriteAll(u32 first, u32 end)
+-{
+-    u32 x;
+-    u16 rc;
+-
+-    ReproSram_ForgetBank();
+-
+-    Con_Print("Erase test in spare area");
+-    rc = EraseSizeTest();
+-    if (rc != REPRO_OK)
+-        return rc;
+-    PrintOk();
+-
+-    for (x = first; x < end; x += sBlock)
+-    {
+-        if (BlockIsTarget(x))
+-        {
+-            StepDone(x, " already done");
+-            continue;
+-        }
+-        rc = WriteBlock(x);
+-        if (rc != REPRO_OK)
+-            rc = WriteBlock(x);
+-        if (rc != REPRO_OK)
+-            return rc;
+-    }
+-
+-    Con_Print("Erase spare area again");
+-    rc = CleanTestArea();
+-    if (rc != REPRO_OK)
+-        return rc;
+-    PrintOk();
+-    return REPRO_OK;
+-}
+-
+-static const char *ErrorText(u16 rc)
+-{
+-    switch (rc)
+-    {
+-    case REPRO_ERR_TIMEOUT:  return "The chip did not finish.";
+-    case REPRO_ERR_STATUS:   return "The chip reported a failure.";
+-    case REPRO_ERR_VERIFY:   return "Data read back wrong.";
+-    case REPRO_ERR_SRAM:     return "Cart SRAM read back wrong.";
+-    case REPRO_ERR_LOCKED:   return "A block stayed locked.";
+-    case ERR_BLOCK_SMALLER:  return "Erase blocks are smaller\nthan the chip reports.";
+-    case ERR_BLOCK_LARGER:   return "Erase blocks are larger\nthan the chip reports.";
+-    case ERR_WRITE_VERIFY:   return "The save read back wrong.";
+-    case ERR_MARK_VERIFY:    return "Test marker read back wrong.";
+-    case ERR_SIZE_TEST:      return "The erase test failed.";
+-    }
+-    return "Unknown error.";
+-}
+-
+-static bool32 IsFatal(u16 rc)
+-{
+-    return rc == ERR_BLOCK_SMALLER || rc == ERR_BLOCK_LARGER || rc == ERR_SIZE_TEST;
+-}
+-
+-// Raw answers to the probe's own ID queries, for chips it did not recognise.
+-static void ShowChipIds(void)
+-{
+-    u16 ime;
+-    u16 header1 = ROM_READ16(2);
+-    u16 id0, id1;
+-
+-    IRQ_DISABLE(ime);
+-    ROM_WRITE16(0, 0xFF);
+-    ROM_WRITE16(0, 0x50);
+-    ROM_WRITE16(0, 0x90);
+-    id0 = ROM_READ16(0);
+-    id1 = ROM_READ16(2);
+-    ROM_WRITE16(0, 0xFF);
+-    Con_Print("Intel ID ");
+-    Con_Hex(id0, 4);
+-    Con_Putc(' ');
+-    Con_Hex(id1, 4);
+-    Con_Putc('\n');
+-    if (id1 == header1)
+-    {
+-        ROM_WRITE16(0, 0xF0);
+-        ROM_WRITE16(0xAAA, 0xA9);
+-        ROM_WRITE16(0x554, 0x56);
+-        ROM_WRITE16(0xAAA, 0x90);
+-        id0 = ROM_READ16(0);
+-        id1 = ROM_READ16(2);
+-        ROM_WRITE16(0, 0xF0);
+-        Con_Print("AMD ID ");
+-        Con_Hex(id0, 4);
+-        Con_Putc(' ');
+-        Con_Hex(id1, 4);
+-        Con_Putc('\n');
+-    }
+-    ROM_WRITE16(0, 0xF0F0);
+-    ROM_WRITE16(0, 0xFFFF);
+-    IRQ_RESTORE(ime);
+-}
+-
+ void AgbMain(void)
+ {
+-    const struct ReproCart *probed;
+     struct SaveInfo cartInfo, newInfo;
+-    u32 first, end, x, i;
++    const char *refusal;
+     u16 rc;
+ 
+     REG_WAITCNT = 0x4014; // the same as Emerald: ROM 3/1 wait states, SRAM 4
+@@ -684,7 +123,7 @@ void AgbMain(void)
+ 
+     if (!ConfigOk())
+         Fail("This file is incomplete.\nBuild it again with\nmake_save_writer.py.\n");
+-    sFFHash = FFHash();
++    SaveCore_Init();
+     WaitForCart();
+ 
+     Con_Print("Cart matches your dump");
+@@ -696,70 +135,26 @@ void AgbMain(void)
+     }
+     PrintOk();
+ 
+-    probed = ReproCart_Probe();
+-    for (i = 0; i < sizeof(sCart); i++)
+-        ((u8 *)&sCart)[i] = ((const u8 *)probed)[i];
+-    Con_Print("Chip: ");
+-    Con_Print(sTypeNames[sCart.type]);
+-    Con_Putc('\n');
+-    if (!sCart.supported)
+-    {
+-        if (sCart.type == REPRO_CART_UNKNOWN)
+-            ShowChipIds();
+-        Fail("This board type is not\nsupported. Nothing was\nwritten.\n");
+-    }
++    refusal = ProbeChip();
++    if (refusal)
++        Fail(refusal);
+ 
+-    if (!Cfi_Read(&sCart, &sCfi))
+-    {
+-        Con_Print("CFI: no answer (");
+-        Con_Hex(sCfi.raw[0], 2);
+-        Con_Hex(sCfi.raw[1], 2);
+-        Con_Hex(sCfi.raw[2], 2);
+-        Con_Print(")\n");
+-        Fail("Can't read the chip's block\nlayout. Nothing was written.\n");
+-    }
+-    sBlock = sCfi.blockSize;
+-    Con_Print("Blocks: ");
+-    Con_Dec(sBlock / 1024);
+-    Con_Print(" KB, chip ");
+-    Con_Dec(sCfi.busSize >> 20);
+-    Con_Print(" MB\n");
+-    first = sCfg->saveAddr & ~(sBlock - 1);
+-    end = (sCfg->saveAddr + sCfg->saveSize + sBlock - 1) & ~(sBlock - 1);
+-    if (sBlock < MIN_BLOCK || sBlock > MAX_BLOCK || (sBlock & (sBlock - 1)) || sCfi.busSize < 0x1000000
+-     || first < sCfg->areaStart || end > sCfg->areaEnd)
+-        Fail("This block layout is not\nsupported. Nothing was\nwritten.\n");
+-    sPiece = sBlock < PIECE_MAX ? sBlock : PIECE_MAX;
+-
+-    ReadSaveInfo(ROM_ADDR(sCfg->saveAddr), &cartInfo);
+-    ReadSaveInfo(sSave, &newInfo);
++    ReadSaveInfo(ROM_ADDR(sCfg->saveAddr), &cartInfo, FALSE);
++    ReadSaveInfo(sSave, &newInfo, FALSE);
+     PrintSaveInfo("On the cart:", &cartInfo);
+     PrintSaveInfo("New save:", &newInfo);
+ 
+-    for (x = first; x < end; x += sBlock)
+-    {
+-        if (!BlockIsTarget(x))
+-            break;
+-    }
+-    if (x >= end)
+-    {
+-        if (TestAreaClean())
+-        {
+-            Con_SetColor(COLOR_GREEN);
+-            Con_Print("\nThe cart already holds this\nsave. Nothing to do.\n");
+-            Finish(0);
+-        }
+-        // Power was lost while the test area was being erased again.
+-        Con_Print("Save already written. The\nspare area still holds data\nfrom a stopped run: erase it.\n");
+-    }
+-    else
++    if (SaveWritten(sSave, sCfg->saveAddr))
+     {
+-        Con_Print("Will rewrite ");
+-        Con_Hex(first, 6);
+-        Con_Putc('-');
+-        Con_Hex(end - 1, 6);
+-        Con_Putc('\n');
++        Con_SetColor(COLOR_GREEN);
++        Con_Print("\nThe cart already holds this\nsave. Nothing to do.\n");
++        Finish(0);
+     }
++    Con_Print("Will rewrite ");
++    Con_Hex(sCfg->saveAddr, 6);
++    Con_Putc('-');
++    Con_Hex(sCfg->saveAddr + SAVE_SIZE - 1, 6);
++    Con_Putc('\n');
+     Con_SetColor(COLOR_YELLOW);
+     Con_Print("\nThe cart's save will be\nreplaced. Keep the GBA on.\nTo write, hold L+R, press A.\nTo cancel, turn the GBA off.\n\n");
+     Con_SetColor(COLOR_WHITE);
+@@ -768,31 +163,10 @@ void AgbMain(void)
+ 
+     for (;;)
+     {
+-        rc = WriteAll(first, end);
++        rc = WriteSave(sSave, sCfg->saveAddr);
+         if (rc == REPRO_OK)
+             break;
+-        Con_Putc('\n');
+-        Con_SetColor(COLOR_RED);
+-        Con_Print("Error ");
+-        Con_Hex(rc, 4);
+-        Con_Print(" at ");
+-        Con_Hex(sErrorAddr, 6);
+-        Con_Putc('\n');
+-        Con_Print(ErrorText(rc));
+-        Con_Putc('\n');
+-        if (rc == ERR_SIZE_TEST)
+-        {
+-            Con_Print("Chip error ");
+-            Con_Hex(sTestError, 4);
+-            Con_Putc('\n');
+-        }
+-        Con_SetColor(COLOR_WHITE);
+-        if (IsFatal(rc))
+-        {
+-            Con_Print(sWriteStarted ? "The save was partly written:\nsend this again to finish.\n"
+-                                    : "The save was not changed.\n");
+-            Fail("Stopped. Turn the GBA off\nand report this screen.\n");
+-        }
++        PrintError(rc);
+         Con_Print("Press A to try again. Or\nturn off and send this again\nlater to finish the write.\n");
+         ErrorWait(rc);
+     }
+diff --git a/repro_tools/make_batteryless_dumper.py b/repro_tools/make_batteryless_dumper.py
+new file mode 100644
+index 0000000..9abf71f
+--- /dev/null
++++ b/repro_tools/make_batteryless_dumper.py
+@@ -0,0 +1,140 @@
++#!/usr/bin/env python3
++"""Makes the batteryless edition of FIX94's GBA Link Cable Dumper.
++
++Puts a new GBA side (bldumper_code.bin) into the dumper's boot.dol and keeps
++the Wii side as it is. With a batteryless repro cart inserted, the dumper's
++"backup save" (Y) and "restore save" (X) then read and write the save the
++cart keeps in its ROM: about 12 seconds instead of a 50 minute ROM dump.
++Restores are shown and confirmed on the GBA screen. Game and BIOS dumps work
++as before; for saves on normal carts, keep using the original dumper.
++
++usage:
++  make_batteryless_dumper.py BOOT.DOL OUTPUT_FOLDER
++
++BOOT.DOL is GBA Link Cable Dumper v1.6 for the Wii (its boot.dol from the
++apps folder of your SD card). OUTPUT_FOLDER receives boot.dol and meta.xml:
++copy it into SD:/apps/ as its own folder, next to the original dumper.
++Standard library only; BOOT.DOL itself is never modified.
++"""
++import hashlib
++import os
++import struct
++import sys
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++CODE_PATH = os.path.join(HERE, 'bldumper_code.bin')
++
++# The GBA side of v1.6 prints this at start-up; the Wii side prints a different line.
++MARKER = b'\x1b[9;2HGBA Link Cable Dumper v1.6'
++MAX_PAYLOAD = 0x40000
++RECEIVE_BUFFER = 0x20000      # bldumper keeps a restored save at 0x02020000
++META_XML = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
++<app version="1">
++  <name>GBA Link Cable Dumper (batteryless)</name>
++  <coder>FIX94, batteryless GBA side added</coder>
++  <version>1.6-bl0.1</version>
++  <short_description>Saves of batteryless repro carts</short_description>
++  <long_description>FIX94's GBA Link Cable Dumper v1.6 with a new GBA side: backup save and restore save read and write the save that batteryless repro carts keep in ROM. Restores are confirmed on the GBA. For saves on normal carts, use the original dumper.</long_description>
++</app>
++'''
++
++
++def be32(data, pos):
++    return struct.unpack_from('>I', data, pos)[0]
++
++
++def dol_sections(dol):
++    """(file offset, size) of every text and data section."""
++    out = []
++    for i in range(18):
++        off, size = be32(dol, i * 4), be32(dol, 0x90 + i * 4)
++        if size:
++            out.append((off, size))
++    return out
++
++
++def header_ok(data, start):
++    """A multiboot image header: ARM branches at 0 and 0xC0, fixed byte 0x96,
++    valid complement check."""
++    if start < 0 or start + 0xC4 > len(data):
++        return False
++    if data[start + 3] != 0xEA or data[start + 0xC3] != 0xEA or data[start + 0xB2] != 0x96:
++        return False
++    chk = 0
++    for b in data[start + 0xA0:start + 0xBD]:
++        chk = (chk - b) & 0xFF
++    return data[start + 0xBD] == (chk - 0x19) & 0xFF
++
++
++def find_payload(dol):
++    """(start, size, offset of the size field) of the embedded GBA program."""
++    hits = []
++    pos = dol.find(MARKER)
++    while pos >= 0:
++        hits.append(pos)
++        pos = dol.find(MARKER, pos + 1)
++    if len(hits) != 1:
++        raise SystemExit('error: this is not GBA Link Cable Dumper v1.6 (or it is already patched)')
++    marker = hits[0]
++    starts = [s for s in range(marker - 0xC4, max(-1, marker - MAX_PAYLOAD), -1) if header_ok(dol, s)]
++    if not starts:
++        raise SystemExit('error: could not find the start of the GBA program')
++    start = starts[0]
++    # bin2o puts the size, a big-endian word, right after the data (plus alignment).
++    fields = [q for q in range(marker, min(len(dol) - 3, start + MAX_PAYLOAD + 32))
++              if start + be32(dol, q) <= q < start + be32(dol, q) + 32 and be32(dol, q) > marker - start]
++    if len(fields) != 1:
++        raise SystemExit('error: could not find the size of the GBA program (%d candidates)' % len(fields))
++    size_at = fields[0]
++    size = be32(dol, size_at)
++    if not any(off <= start and size_at + 4 <= off + sz for off, sz in dol_sections(dol)):
++        raise SystemExit('error: the GBA program is not inside one section of the dol')
++    return start, size, size_at
++
++
++def build(dol, code):
++    start, size, size_at = find_payload(dol)
++    payload = bytearray(code)
++    payload += b'\0' * (-len(payload) % 4)
++    payload[0x04:0xA0] = dol[start + 0x04:start + 0xA0]     # Nintendo logo, from the original
++    payload[0xA0:0xB0] = b'BATTERYLESSDBLDP'                  # title and game code
++    chk = 0
++    for b in payload[0xA0:0xBD]:
++        chk = (chk - b) & 0xFF
++    payload[0xBD] = (chk - 0x19) & 0xFF
++    if len(payload) > size:
++        raise SystemExit('error: the new GBA program (%d bytes) does not fit in place of the old one (%d bytes)'
++                         % (len(payload), size))
++    if len(payload) > RECEIVE_BUFFER:
++        raise SystemExit('error: the new GBA program is too large')
++    out = bytearray(dol)
++    out[start:start + size] = bytes(payload) + b'\0' * (size - len(payload))
++    struct.pack_into('>I', out, size_at, len(payload))
++    # Check the result the same way an unpatched file is read.
++    assert header_ok(out, start) and be32(out, size_at) == len(payload)
++    assert out[:start] == dol[:start] and out[start + size:size_at] == dol[start + size:size_at]
++    assert out[size_at + 4:] == dol[size_at + 4:]
++    return bytes(out), {'start': start, 'old_size': size, 'new_size': len(payload)}
++
++
++def main(argv):
++    if len(argv) != 3:
++        print(__doc__)
++        return 2
++    dol_path, out_dir = argv[1:]
++    dol = open(dol_path, 'rb').read()
++    out, info = build(dol, open(CODE_PATH, 'rb').read())
++    os.makedirs(out_dir, exist_ok=True)
++    out_path = os.path.join(out_dir, 'boot.dol')
++    if os.path.exists(out_path) and os.path.samefile(out_path, dol_path):
++        raise SystemExit('error: choose an output folder other than the original dumper\'s')
++    open(out_path, 'wb').write(out)
++    open(os.path.join(out_dir, 'meta.xml'), 'w', newline='\n').write(META_XML)
++    print('GBA program found at 0x%X in the dol (%d bytes); replaced with %d bytes'
++          % (info['start'], info['old_size'], info['new_size']))
++    print('wrote %s (SHA-1 %s) and meta.xml' % (out_path, hashlib.sha1(out).hexdigest()))
++    return 0
++
++
++if __name__ == '__main__':
++    sys.exit(main(sys.argv))
+diff --git a/repro_tools/savewriter_code.bin b/repro_tools/savewriter_code.bin
+index 047977278d3aea3e32e9496987bccc4ef6302c67..9822d733e9c25356204b783018b4471933fa615d 100755
+GIT binary patch
+delta 3187
+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
+bBO`}KdH}Z276HWJQSpVvofn6sXF~r6dN?S|
+
+delta 4436
+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
+
+diff --git a/repro_tools/test/bldumper_emu_test.py b/repro_tools/test/bldumper_emu_test.py
+new file mode 100644
+index 0000000..1764623
+--- /dev/null
++++ b/repro_tools/test/bldumper_emu_test.py
+@@ -0,0 +1,369 @@
++#!/usr/bin/env python3
++"""Runs the batteryless dumper's GBA program in the ARM emulator against the
++simulated carts, with the Wii side of GBA Link Cable Dumper v1.6 replayed in
++Python from its source/main.c: save backup, restore (confirmed, cancelled,
++invalid, interrupted by a power cut), clear, game and BIOS dumps, no cart and
++a cart without a batteryless save, on every supported board.
++
++usage: bldumper_emu_test.py ROM_DUMP
++"""
++import ctypes
++import os
++import struct
++import sys
++
++from unicorn import Uc, UC_ARCH_ARM, UC_MODE_ARM, UC_HOOK_CODE, UC_HOOK_INTR
++from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_CPSR
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++import flasher_emu_test as fe           # noqa: E402
++import gen3save                         # noqa: E402
++
++ELF = os.path.join(fe.TOOLS, 'flasher', 'build', 'bldumper.elf')
++SYMS = fe.symbols(ELF)
++IMAGE = open(os.path.join(fe.TOOLS, 'flasher', 'bldumper_code.bin'), 'rb').read()
++check = fe.check
++KEYS_CONFIRM = 0x301    # L+R+A
++KEYS_CANCEL = 0x002     # B
++
++
++# ------------------------------------------------------------------ Wii side
++# Each generator yields ('recv',) to read JOY_TRANS (getting its value back)
++# or ('send', value) to write JOY_RECV, in the order main.c does.
++
++def wii_session(command, save=None, dump_words=0x100):
++    if (yield ('recv',)) != 0:                       # "if(recv() == 0) //ready"
++        return {'error': 'not ready'}
++    gbasize = 0
++    while gbasize == 0:
++        gbasize = yield ('recv',)
++    yield ('send', 0)
++    savesize = yield ('recv',)
++    yield ('send', 0)
++    out = {'gbasize': gbasize, 'savesize': savesize}
++    if gbasize == 0xFFFFFFFF:
++        return out
++    header = b''
++    for _ in range(0x30):
++        header += struct.pack('<I', (yield ('recv',)))
++    out['header'] = header
++    if command in (2, 3, 4) and savesize == 0:
++        command = 0                                  # the Wii only offers Y/X/Z with a save
++    yield ('send', command)
++    if command == 1:                                 # dump: read only the start here
++        data = b''
++        for _ in range(dump_words):
++            data += struct.pack('<I', (yield ('recv',)))
++        out['dump'] = data
++        out['stop'] = True                           # stop the run mid-dump
++    elif command == 2:
++        readval = 0
++        while readval != savesize:
++            readval = yield ('recv',)
++        yield ('send', 0)
++        data = b''
++        for _ in range(savesize // 4):
++            data += struct.pack('<I', (yield ('recv',)))
++        out['save'] = data
++    elif command in (3, 4):
++        readval = 0
++        while readval != savesize:
++            readval = yield ('recv',)
++        if command == 3:
++            for i in range(0, savesize, 4):
++                yield ('send', struct.unpack_from('<I', save, i)[0])
++        while (yield ('recv',)) != 0:
++            pass
++        yield ('send', 0)
++    return out
++
++
++def wii_bios():
++    yield ('send', 5)
++    data = b''
++    for _ in range(0x1000):
++        data += struct.pack('<I', (yield ('recv',)))
++    return {'bios': data}
++
++
++class Run:
++    """The GBA running the batteryless dumper, driven by a list of Wii scripts."""
++
++    def __init__(self, scripts, keys=KEYS_CONFIRM, no_cart=False, stop_after_ops=None):
++        uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
++        uc.mem_map(0x00000000, 0x4000)
++        uc.mem_map(0x02000000, 0x40000)
++        uc.mem_map(0x03000000, 0x8000)
++        uc.mmio_map(0x04000000, 0x1000, self.io_read, None, self.io_write, None)
++        uc.mem_map(0x05000000, 0x400)
++        uc.mem_map(0x06000000, 0x18000)
++        uc.mem_map(0x07000000, 0x400)
++        uc.mmio_map(0x08000000, 0x02000000, self.rom_read, None, self.rom_write, None)
++        uc.mmio_map(0x0E000000, 0x10000, self.sram_read, None, self.sram_write, None)
++        uc.mem_write(0x02000000, IMAGE)
++        for name, fn in (('WaitVBlank', self.ret0), ('ReadKeys', self.read_keys), ('ErrorWait', self.error_wait)):
++            addr = SYMS[name] & ~1
++            uc.hook_add(UC_HOOK_CODE, fn, begin=addr, end=addr)
++        uc.hook_add(UC_HOOK_INTR, self.swi)
++        self.uc = uc
++        self.io = {}
++        self.joycnt = 0
++        self.trans = 0
++        self.recv = 0
++        self.keys = keys
++        self.toggle = 0
++        self.no_cart = no_cart
++        self.stop_after_ops = stop_after_ops
++        self.interrupted = False
++        self.errors = []
++        self.erased = []
++        self.scripts = list(scripts)
++        self.results = []
++        self.gen = None
++        self.polls = 0
++        self.idle = 0
++        self.next_script()
++
++    def next_script(self):
++        self.gen = self.scripts.pop(0)() if self.scripts else None
++        self.op = next(self.gen) if self.gen else None
++
++    def wii_step(self):
++        """One SI transfer, every third time the GBA polls JOYCNT."""
++        self.polls += 1
++        if self.polls % 3:
++            return
++        if self.gen is None:
++            self.idle += 1
++            if self.idle > 50:              # let the GBA print, then stop
++                self.uc.emu_stop()
++            return
++        value = None
++        if self.op[0] == 'recv':
++            value = self.trans
++            self.joycnt |= 4
++        else:
++            self.recv = self.op[1]
++            self.joycnt |= 2
++        try:
++            self.op = self.gen.send(value)
++        except StopIteration as e:
++            self.results.append(e.value)
++            if e.value and e.value.get('stop'):
++                self.uc.emu_stop()
++                return
++            self.next_script()
++
++    # I/O
++    def io_read(self, uc, offset, size, data):
++        if offset == 0x140:
++            self.wii_step()
++            return self.joycnt
++        if 0x150 <= offset < 0x154:
++            return (self.recv >> ((offset - 0x150) * 8)) & ((1 << (size * 8)) - 1)
++        if 0x154 <= offset < 0x158:
++            return (self.trans >> ((offset - 0x154) * 8)) & ((1 << (size * 8)) - 1)
++        if offset == 0x006:
++            return 160
++        return self.io.get(offset, 0)
++
++    def io_write(self, uc, offset, size, value, data):
++        if offset == 0x140:
++            self.joycnt &= ~(value & 7)                 # write 1 to clear
++        elif offset == 0x154:
++            self.trans = value & (0xFFFFFFFF if size == 4 else 0xFFFF)
++        else:
++            self.io[offset] = value
++
++    # cart bus
++    def rom_read(self, uc, offset, size, data):
++        if self.no_cart:                                 # open bus: each halfword its address
++            lo = (offset >> 1) & 0xFFFF
++            if size == 4:
++                return lo | ((((offset >> 1) + 1) & 0xFFFF) << 16)
++            return (lo >> ((offset & 1) * 8)) & 0xFF if size == 1 else lo
++        if size == 1:
++            return (fe.lib.HostRomRead16(offset & ~1) >> ((offset & 1) * 8)) & 0xFF
++        if size == 2:
++            return fe.lib.HostRomRead16(offset)
++        return fe.lib.HostRomRead16(offset) | (fe.lib.HostRomRead16(offset + 2) << 16)
++
++    def rom_write(self, uc, offset, size, value, data):
++        if offset == 0x01000000 and size == 1:
++            fe.lib.HostBankWrite8(value)
++            return
++        assert size == 2, 'unexpected %d-byte cart write' % size
++        before = fe.stats().erases
++        fe.lib.HostRomWrite16(offset, value)
++        if fe.stats().erases != before:
++            self.erased.append(fe.lib.SimLastErase())
++        if self.stop_after_ops is not None and fe.Run.ops() >= self.stop_after_ops and not self.interrupted:
++            self.interrupted = True
++            uc.emu_stop()
++
++    def sram_read(self, uc, offset, size, data):
++        return fe.lib.HostSramRead8(offset)
++
++    def sram_write(self, uc, offset, size, value, data):
++        fe.lib.HostSramWrite8(offset, value)
++
++    # hooked functions and BIOS calls
++    def ret(self, uc, value):
++        uc.reg_write(UC_ARM_REG_R0, value)
++        uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
++
++    def ret0(self, uc, address, size, data):
++        self.ret(uc, 0)
++
++    def read_keys(self, uc, address, size, data):
++        self.toggle ^= 1
++        self.ret(uc, self.keys if self.toggle == 0 else 0)
++
++    def error_wait(self, uc, address, size, data):
++        self.errors.append(uc.reg_read(UC_ARM_REG_R0))
++        self.ret(uc, 0)
++
++    def swi(self, uc, intno, data):
++        thumb = uc.reg_read(UC_ARM_REG_CPSR) & 0x20
++        pc = uc.reg_read(UC_ARM_REG_PC)
++        num = uc.mem_read(pc - 2, 1)[0] if thumb else uc.mem_read(pc - 4 + 2, 1)[0]
++        if num != 0x1F:
++            raise RuntimeError('unexpected SWI 0x%X' % num)
++        uc.reg_write(UC_ARM_REG_R0, (uc.reg_read(UC_ARM_REG_R0) * 0x9E3779B1) & 0xFFFFFFFF)
++
++    def run(self):
++        self.uc.emu_start(0x020000C0, 0xFFFFFFFF, timeout=900 * 1000000)
++        return self
++
++    def screen(self):
++        vram = self.uc.mem_read(0x0600F800, 32 * 20 * 2)
++        lines = []
++        for y in range(20):
++            row = struct.unpack_from('<30H', vram, y * 64)
++            lines.append(''.join(chr((e & 0x3FF) + 0x20) if (e & 0x3FF) < 0x5F else '#' for e in row).rstrip())
++        return '\n'.join(lines).rstrip()
++
++
++def setup(board, rom, erase_block=None):
++    fe.lib.SimInit(fe.BOARDS[board], 5)
++    if erase_block:
++        fe.lib.SimSetEraseBlock(erase_block)
++    ctypes.memmove(fe.lib.SimRom(), rom, fe.ROM_SIZE)
++
++
++def edited_save(save):
++    save = bytearray(save)
++    _, _, sb2 = gen3save.newest(save)
++    save[sb2:sb2 + 7] = bytes([0xCE, 0xBF, 0xCD, 0xCE, 0xBF, 0xCC, 0xFF])      # "TESTER"
++    struct.pack_into('<H', save, sb2 + 0xFF6, gen3save.checksum(save[sb2:sb2 + gen3save.EMERALD_SIZES[0]]))
++    return bytes(save)
++
++
++def main(argv):
++    dump = open(argv[1], 'rb').read()
++    dump = dump + b'\xff' * (fe.ROM_SIZE - len(dump))
++    from emerald_rom import find_saves
++    s = find_saves(dump[:0x1000000])[0]
++    old = dump[s:s + 0x20000]
++    new = edited_save(old)
++    expected = dump[:s] + new + dump[s + 0x20000:]
++    print('batteryless dumper program %d bytes; save at 0x%X' % (len(IMAGE), s))
++
++    def flash_checks(runs, allowed_extra=()):
++        st = fe.stats()
++        check(st.violations == 0, 'chip protocol violations: %d (%s)' % (st.violations, fe.lib.SimLastViolation()))
++        check(st.badBankWrites == 0, 'bank register writes with wrong values: %d' % st.badBankWrites)
++        block = fe.lib.SimEraseBlock()
++        bad = [hex(e) for r in runs for e in r.erased
++               if not (0xFC0000 <= e and e + block <= 0x1000000) and not (0xE80000 <= e and e + block <= 0xF80000)]
++        check(not bad, 'erases outside the save area and the test area: %s' % bad[:5])
++
++    print('backup')
++    setup('amd_swapped', dump, 0x20000)
++    r = Run([lambda: wii_session(2)]).run()
++    res = r.results[0] if r.results else {}
++    check(res.get('gbasize') == 0x2000000 and res.get('savesize') == 0x20000, 'sizes: %s' % {k: res.get(k) for k in ('gbasize', 'savesize')})
++    check(res.get('header') == dump[:0xC0], 'header differs')
++    check(res.get('save') == old, 'backed-up save differs from the save area')
++    check(fe.stats().erases == 0 and fe.stats().programs == 0, 'a backup wrote to the cart')
++    print('\n'.join('    | ' + l for l in r.screen().splitlines()))
++
++    print('restore, then backup again in the same session')
++    for board, block in (('amd_swapped', 0x20000), ('amd_swapped', 0x10000), ('amd_dual', None),
++                         ('intel_word', None), ('intel_buffered', 0x20000), ('intel_buffered', 0x40000)):
++        setup(board, dump, block)
++        r = Run([lambda: wii_session(3, new), lambda: wii_session(2)]).run()
++        ok = check(len(r.results) == 2 and 'Save written.' in r.screen(), '%s: restore did not finish:\n%s' % (board, r.screen()))
++        check(bytes(fe.rom_view()) == expected, '%s: ROM after restore differs at 0x%X' % (board, fe.first_diff(bytes(fe.rom_view()), expected) or 0))
++        check(ok and r.results[1].get('save') == new, '%s: backup after restore differs' % board)
++        flash_checks([r])
++        print('  %s%s: %d erases, %d program ops' % (board, ', %d KiB blocks' % (block >> 10) if block else '',
++                                                    fe.stats().erases, fe.stats().programs))
++        if board == 'amd_swapped' and block == 0x20000:
++            print('\n'.join('    | ' + l for l in r.screen().splitlines()))
++
++    print('restore cancelled with B')
++    setup('amd_swapped', dump, 0x20000)
++    r = Run([lambda: wii_session(3, new)], keys=KEYS_CANCEL).run()
++    check('Cancelled' in r.screen() and r.results, 'cancel:\n' + r.screen())
++    check(bytes(fe.rom_view()) == dump and fe.stats().erases == 0, 'a cancelled restore wrote to the cart')
++
++    print('restore of a file that is not a save')
++    setup('amd_swapped', dump, 0x20000)
++    junk = bytes((i * 37 + 11) & 0xFF for i in range(0x20000))
++    r = Run([lambda: wii_session(3, junk)]).run()
++    check('not a valid' in r.screen() and r.results, 'junk restore:\n' + r.screen())
++    check(bytes(fe.rom_view()) == dump and fe.stats().erases == 0, 'a junk restore wrote to the cart')
++    broken = bytearray(new)
++    broken[0x100] ^= 0xFF                              # breaks a checksum in one slot only
++    r = Run([lambda: wii_session(3, bytes(broken))]).run()
++    check('Save written.' in r.screen(), 'a save with one damaged slot should still be written:\n' + r.screen())
++
++    print('restore interrupted by power cuts, then restored again')
++    setup('amd_swapped', dump, 0x20000)
++    Run([lambda: wii_session(3, new)]).run()
++    total = fe.Run.ops()
++    for n in sorted(set([1, 3, 5, 7] + [total * k // 6 for k in range(1, 6)] + [total - 1])):
++        setup('amd_swapped', dump, 0x20000)
++        r1 = Run([lambda: wii_session(3, new)], stop_after_ops=n).run()
++        fe.lib.SimPowerCycle()
++        r2 = Run([lambda: wii_session(3, new)]).run()
++        ok = check(r1.interrupted and 'Save written.' in r2.screen() or 'already holds' in r2.screen(),
++                   'cut at %d: second restore did not finish:\n%s' % (n, r2.screen()))
++        ok &= check(bytes(fe.rom_view()) == expected, 'cut at %d: ROM differs' % n)
++        flash_checks([r1, r2])
++        print('  cut after %5d of %d ops: %s' % (n, total, 'ok' if ok else 'FAILED'))
++
++    print('clear, game dump, BIOS dump')
++    setup('amd_swapped', dump, 0x20000)
++    r = Run([lambda: wii_session(4), wii_bios, lambda: wii_session(1, dump_words=0x4000)]).run()
++    check(len(r.results) == 3, 'not all three finished: %s' % [list(x) for x in r.results])
++    check('Nothing was changed' in r.screen() and bytes(fe.rom_view()) == dump, 'clear changed something')
++    check(len(r.results) > 1 and len(r.results[1].get('bios', b'')) == 0x4000, 'BIOS dump size')
++    check(len(r.results) > 2 and r.results[2].get('dump') == dump[:0x10000], 'game dump start differs')
++
++    print('no cart; empty save area; cart without batteryless code')
++    setup('amd_swapped', dump, 0x20000)
++    r = Run([lambda: wii_session(2)], no_cart=True).run()
++    check(r.results and r.results[0].get('gbasize') == 0xFFFFFFFF and 'No cart' in r.screen(), 'no cart:\n' + r.screen())
++    empty = dump[:s] + b'\xff' * 0x20000 + dump[s + 0x20000:]
++    setup('amd_swapped', empty, 0x20000)
++    r = Run([lambda: wii_session(3, new)]).run()
++    check(r.results and r.results[0].get('savesize') == 0x20000 and 'holds no valid save' in r.screen()
++          and 'Save written.' in r.screen(), 'empty save area (found through the boot code):\n' + r.screen())
++    check(bytes(fe.rom_view()) == expected, 'restore into an empty save area: ROM differs')
++    plain = struct.pack('<I', 0xEA00002E) + empty[4:]          # entry point as on an unpatched cart
++    setup('amd_swapped', plain, 0x20000)
++    r = Run([lambda: wii_session(2)]).run()
++    check(r.results and r.results[0].get('savesize') == 0 and 'No batteryless save' in r.screen(), 'no save:\n' + r.screen())
++    setup('amd_swapped', struct.pack('<I', 0xEA00002E) + dump[4:], 0x20000)   # other batteryless code
++    r = Run([lambda: wii_session(2)]).run()
++    check(r.results and r.results[0].get('save') == old, 'save found by its contents without the boot code')
++
++    print('%d FAILURES' % fe.failures if fe.failures else 'all batteryless dumper tests passed')
++    return 1 if fe.failures else 0
++
++
++if __name__ == '__main__':
++    sys.exit(main(sys.argv))
+diff --git a/repro_tools/test/patcher_test.py b/repro_tools/test/patcher_test.py
+new file mode 100644
+index 0000000..76b9fee
+--- /dev/null
++++ b/repro_tools/test/patcher_test.py
+@@ -0,0 +1,109 @@
++#!/usr/bin/env python3
++"""Checks make_batteryless_dumper.py on a synthetic boot.dol laid out like
++devkitPPC's bin2o output (a 32-byte aligned GBA program inside a data section,
++followed by its size as a big-endian word), and on a real boot.dol if one is
++given.
++
++usage: patcher_test.py ROM_DUMP [BOOT.DOL]
++"""
++import os
++import random
++import struct
++import sys
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, os.path.normpath(os.path.join(HERE, '..')))
++import make_batteryless_dumper as mbd     # noqa: E402
++
++failures = 0
++
++
++def check(cond, msg):
++    global failures
++    if not cond:
++        failures += 1
++        print('  FAIL:', msg)
++
++
++def fake_payload(logo, size, rnd):
++    p = bytearray(rnd.getrandbits(8) for _ in range(size))
++    struct.pack_into('<I', p, 0, 0xEA00002E)
++    p[4:0xA0] = logo
++    p[0xA0:0xB0] = b'GBALINKDUMP\0\0\0\0\0'
++    p[0xB2] = 0x96
++    chk = 0
++    for b in p[0xA0:0xBD]:
++        chk = (chk - b) & 0xFF
++    p[0xBD] = (chk - 0x19) & 0xFF
++    struct.pack_into('<I', p, 0xC0, 0xEA000006)
++    p[0x3000:0x3000 + len(mbd.MARKER) + 1] = mbd.MARKER + b'\n'
++    return bytes(p)
++
++
++def fake_dol(payload, rnd, pad_size_field=True):
++    text = bytes(rnd.getrandbits(8) for _ in range(0x8000))
++    before = bytes(rnd.getrandbits(8) for _ in range(0x1220))
++    data = bytearray(before)
++    data += b'\0' * (-len(data) % 32)
++    start_in_data = len(data)
++    data += payload
++    if pad_size_field:
++        data += b'\0' * (-len(data) % 4)
++    data += struct.pack('>I', len(payload))
++    data += bytes(rnd.getrandbits(8) for _ in range(0x2000))
++    hdr = bytearray(0x100)
++    struct.pack_into('>I', hdr, 0x00, 0x100)                 # text 0 offset
++    struct.pack_into('>I', hdr, 0x1C, 0x100 + len(text))     # data 0 offset
++    struct.pack_into('>I', hdr, 0x48, 0x80003100)
++    struct.pack_into('>I', hdr, 0x64, 0x80010000)
++    struct.pack_into('>I', hdr, 0x90, len(text))
++    struct.pack_into('>I', hdr, 0xAC, len(data))
++    struct.pack_into('>I', hdr, 0xE0, 0x80003100)
++    return bytes(hdr + text + data), 0x100 + len(text) + start_in_data
++
++
++def main(argv):
++    rom = open(argv[1], 'rb').read(0xC0)
++    logo = rom[4:0xA0]
++    code = open(mbd.CODE_PATH, 'rb').read()
++    rnd = random.Random(1)
++    for size, padded in ((40000, True), (len(code) + 3, False), (0x9FFF, True)):
++        payload = fake_payload(logo, size, rnd)
++        dol, start = fake_dol(payload, rnd, padded)
++        try:
++            out, info = mbd.build(dol, code)
++        except SystemExit as e:
++            check(size < len(code) + (-len(code) % 4), 'size %d: refused: %s' % (size, e))
++            continue
++        new = len(code) + (-len(code) % 4)
++        check(info['start'] == start and info['old_size'] == size and info['new_size'] == new, 'size %d: found %s' % (size, info))
++        check(out[start:start + new][0xC0:] == (code + b'\0' * 4)[0xC0:new], 'size %d: code not in place' % size)
++        check(out[start + 4:start + 0xA0] == logo, 'size %d: logo not kept' % size)
++        check(mbd.header_ok(out, start), 'size %d: header check fails' % size)
++        check(out[start + new:start + size] == b'\0' * (size - new), 'size %d: old bytes left behind' % size)
++        diff = [i for i in range(len(dol)) if dol[i] != out[i] and not start <= i < start + size]
++        check(len(diff) <= 4 and all(dol[i] != out[i] for i in diff), 'size %d: bytes changed outside: %s' % (size, diff[:8]))
++        try:
++            mbd.build(out, code)
++            check(False, 'size %d: patching twice should be refused' % size)
++        except SystemExit:
++            pass
++        print('  synthetic dol, original program %d bytes: ok' % size)
++    small = fake_payload(logo, 0x2000, rnd)
++    dol, _ = fake_dol(small, rnd)
++    try:
++        mbd.build(dol, code)
++        check(False, 'a program too large for the slot should be refused')
++    except SystemExit as e:
++        print('  too large: refused (%s)' % e)
++    if len(argv) > 2:
++        dol = open(argv[2], 'rb').read()
++        out, info = mbd.build(dol, code)
++        print('  real boot.dol: GBA program at 0x%X, %d bytes, replaced with %d bytes' % (
++            info['start'], info['old_size'], info['new_size']))
++    print('%d FAILURES' % failures if failures else 'all patcher tests passed')
++    return 1 if failures else 0
++
++
++if __name__ == '__main__':
++    sys.exit(main(sys.argv))
+-- 
+2.43.0
+

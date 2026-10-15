@@ -1,0 +1,1228 @@
+From a532ff728568da49e39295ef7183976be1c10c44 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 21:37:58 +0800
+Subject: [PATCH 12/14] Flasher v0.3: write the XD link hook too, in one or
+ more spans
+
+The flasher now writes any number of spans (up to four), each with hash
+tables for the written state and for each state it may start from: the
+dump, or the dump after the v0.2 flash. make_flasher.py builds the target
+as the Colosseum program plus the XD hook (Emerald's link code and
+linkhook.bin in the unused end of the Colosseum program area) and groups
+the changes into spans. Blocks already written are left alone, so a cart
+flashed with v0.2 gets only the two blocks that change.
+
+The XD loader index now travels in the loader's own epilogue word (IWRAM)
+instead of EWRAM, which Emerald still owns when the hook runs.
+
+The save writer keeps its own six identity ranges and now also skips the
+link code area, so it works on carts flashed with v0.2 or v0.3.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JPQshc9oBXnzvR2E67Khm
+---
+ repro_tools/flasher/config.h            |  45 +++--
+ repro_tools/flasher/main.c              | 248 ++++++++++++++++--------
+ repro_tools/flasher/savewriter.c        |   2 +-
+ repro_tools/flasher/savewriter_config.h |   3 +-
+ repro_tools/flasher_code.bin            | Bin 13580 -> 14112 bytes
+ repro_tools/linkhook.bin                | Bin 8424 -> 8420 bytes
+ repro_tools/make_flasher.py             | 141 ++++++++++----
+ repro_tools/make_save_writer.py         |  16 +-
+ repro_tools/test/flasher_emu_test.py    |  40 ++--
+ repro_tools/test/savewriter_emu_test.py |  27 ++-
+ repro_tools/test/xd_emu_test.py         |   6 +-
+ repro_tools/xdlink/linkhook.bin         | Bin 8424 -> 8420 bytes
+ repro_tools/xdlink/linkhook.c           |  20 +-
+ repro_tools/xdlink/shim.ld              |   3 +-
+ 14 files changed, 365 insertions(+), 186 deletions(-)
+
+diff --git a/repro_tools/flasher/config.h b/repro_tools/flasher/config.h
+index 1c2ebe6..d743146 100644
+--- a/repro_tools/flasher/config.h
++++ b/repro_tools/flasher/config.h
+@@ -3,22 +3,39 @@
+ 
+ // Data that make_flasher.py appends to flasher_code.bin, at the first
+ // 32-byte boundary after the code. Everything here comes from the user's own
+-// ROM dump and the repro patch; the code itself carries no ROM data.
++// ROM dump and the repro patches; the code itself carries no ROM data.
+ //
+-// Layout after the struct:
+-//   u32 origHash[n]    hash of each 4 KiB chunk of [hashStart, hashEnd) in the dump
+-//   u32 targetHash[n]  the same with the new program bytes in place
+-//   u8  newBytes[overlayEnd - overlayStart], zero-padded to 32 bytes
+-// where n = (hashEnd - hashStart) / HASH_CHUNK.
++// The flasher writes up to MAX_SPANS spans of new bytes. For each span, at
++// tablesOffset (from the start of this struct):
++//   u32 targetHash[n]               hash of each 4 KiB chunk of [hashStart, hashEnd) once written
++//   u32 sourceHash[numSources][n]   the same for each state the area may be in before
++//                                   (the dump; the dump with an earlier flash applied)
++// where n = (hashEnd - hashStart) / HASH_CHUNK, and at bytesOffset the new
++// bytes for [overlayStart, overlayEnd).
+ //
+ // Hashes are FNV-1a over little-endian 32-bit words: h = (h ^ w) * 0x01000193,
+ // starting from HASH_BASIS (see hash.s and make_flasher.py).
+ 
+ #define FLASHER_MAGIC    0x48534C46 // "FLSH"
+-#define FLASHER_VERSION  1
++#define FLASHER_VERSION  2
+ #define HASH_CHUNK       0x1000
+ #define HASH_BASIS       0x811C9DC5
+-#define MAX_ID_RANGES    6
++#define MAX_ID_RANGES    8
++#define MAX_SPANS        4
++#define MAX_SOURCES      2
++
++struct FlasherSpan
++{
++    char name[16];      // shown on screen
++    u32 overlayStart;   // ROM offsets of the bytes to write
++    u32 overlayEnd;
++    u32 hashStart;      // the overlay rounded out to 256 KiB
++    u32 hashEnd;
++    u32 bytesOffset;
++    u32 tablesOffset;
++    u32 numSources;
++    u32 pad;
++};
+ 
+ struct FlasherConfig
+ {
+@@ -30,20 +47,18 @@ struct FlasherConfig
+     u32 pad[4];
+     // 0x20
+     u32 gameCode;       // cart header game code at 0xAC ("BPEE")
+-    u32 programAddr;    // ROM offset of Emerald's built-in Colosseum program
+-    u32 programSize;    // used size of the new program
+     u32 saveAddr;       // ROM offset of the batteryless save area (never written)
+-    u32 overlayStart;   // first ROM offset where the new program differs
+-    u32 overlayEnd;     // end of that span
+-    u32 hashStart;      // overlay span rounded out to 256 KiB
+-    u32 hashEnd;
+-    // 0x40
+     u32 testAddr;       // 512 KiB aligned; [testAddr - 512K, testAddr + 512K) is 0xFF in the dump
+     u32 stagingAddr;    // 256 KiB aligned; [stagingAddr, +256K) is 0xFF in the dump
+     u32 numIdRanges;
+     u32 idHash;         // hash over all idRanges in order
++    u32 numSpans;
++    u32 pad2;
++    // 0x40
+     u32 idRanges[MAX_ID_RANGES][2]; // [start, end), 32-byte aligned ROM offsets
+     // 0x80
++    struct FlasherSpan spans[MAX_SPANS];
++    // 0x140
+ };
+ 
+ #endif // GUARD_FLASHER_CONFIG_H
+diff --git a/repro_tools/flasher/main.c b/repro_tools/flasher/main.c
+index cfd787c..e276ca8 100644
+--- a/repro_tools/flasher/main.c
++++ b/repro_tools/flasher/main.c
+@@ -1,10 +1,11 @@
+ // Emerald link flasher.
+ //
+ // A GBA multiboot program, sent over the GameCube link cable with a batteryless
+-// repro Pokemon Emerald cart inserted. It rewrites the part of the cart's ROM
+-// flash that holds Emerald's built-in Colosseum link program with the repro
+-// build. Everything specific to the cart comes from the data block that
+-// make_flasher.py appends from the user's own dump (config.h).
++// repro Pokemon Emerald cart inserted. It rewrites the parts of the cart's ROM
++// flash that hold Emerald's built-in Colosseum link program (with the repro
++// build) and Emerald's link code (with the hook for XD). Everything specific
++// to the cart comes from the data block that make_flasher.py appends from the
++// user's own dump (config.h).
+ //
+ // Safety design:
+ //  - Nothing is written until the cart's ROM matches that dump (hash over
+@@ -28,7 +29,7 @@
+ #include "cfi.h"
+ #include "config.h"
+ 
+-#define VERSION "v0.2"
++#define VERSION "v0.3"
+ 
+ #define ROM8(off)     (*(vu8 *)(0x08000000 + (off)))
+ #define ROM_ADDR(off) ((const void *)(0x08000000 + (off)))
+@@ -53,10 +54,12 @@
+ enum
+ {
+     BLOCK_TARGET,
+-    BLOCK_ORIGINAL,
++    BLOCK_SOURCE,   // a state the block may be in before it is written
+     BLOCK_OTHER,
+ };
+ 
++#define TABLE_TARGET 0
++
+ extern u8 __image_end[];
+ u32 HashWords(const void *src, u32 bytes, u32 h);
+ 
+@@ -64,9 +67,6 @@ u32 HashWords(const void *src, u32 bytes, u32 h);
+ u32 (*gHashWords)(const void *src, u32 bytes, u32 h) = HashWords;
+ 
+ static const struct FlasherConfig *sCfg;
+-static const u32 *sOrigHash;
+-static const u32 *sTargetHash;
+-static const u8 *sNewBytes;
+ static struct ReproCart sCart;
+ static struct CfiInfo sCfi;
+ static u32 sBlock;
+@@ -159,7 +159,7 @@ void ErrorWait(u32 code)
+ 
+ static bool32 ConfigOk(void)
+ {
+-    u32 chunks;
++    u32 i;
+ 
+     sCfg = (const struct FlasherConfig *)(((u32)__image_end + 31) & ~31);
+     if (sCfg->magic != FLASHER_MAGIC || sCfg->version != FLASHER_VERSION)
+@@ -169,12 +169,20 @@ static bool32 ConfigOk(void)
+         return FALSE;
+     if (gHashWords((const u8 *)sCfg + 0x20, sCfg->totalSize - 0x20, HASH_BASIS) != sCfg->bodyHash)
+         return FALSE;
+-    if (sCfg->numIdRanges > MAX_ID_RANGES)
++    if (sCfg->numIdRanges > MAX_ID_RANGES || sCfg->numSpans == 0 || sCfg->numSpans > MAX_SPANS)
+         return FALSE;
+-    chunks = (sCfg->hashEnd - sCfg->hashStart) / HASH_CHUNK;
+-    sOrigHash = (const u32 *)(sCfg + 1);
+-    sTargetHash = sOrigHash + chunks;
+-    sNewBytes = (const u8 *)(sTargetHash + chunks);
++    for (i = 0; i < sCfg->numSpans; i++)
++    {
++        const struct FlasherSpan *sp = &sCfg->spans[i];
++        u32 chunks = (sp->hashEnd - sp->hashStart) / HASH_CHUNK;
++
++        if (sp->numSources == 0 || sp->numSources > MAX_SOURCES
++         || sp->hashStart > sp->overlayStart || sp->overlayStart >= sp->overlayEnd || sp->overlayEnd > sp->hashEnd
++         || (sp->hashStart & (MAX_BLOCK - 1)) || (sp->hashEnd & (MAX_BLOCK - 1))
++         || sp->tablesOffset + (1 + sp->numSources) * chunks * 4 > sCfg->totalSize
++         || sp->bytesOffset + (sp->overlayEnd - sp->overlayStart) > sCfg->totalSize)
++            return FALSE;
++    }
+     return TRUE;
+ }
+ 
+@@ -206,15 +214,35 @@ static bool32 IsErased(u32 addr, u32 len)
+     return TRUE;
+ }
+ 
+-// Whether the block at 'addr' holds what the table says block 'x' should hold.
+-static bool32 BlockMatches(u32 addr, u32 x, const u32 *table)
++// The span whose hash area holds game block x.
++static const struct FlasherSpan *SpanOf(u32 x)
+ {
+-    u32 first = (x - sCfg->hashStart) / HASH_CHUNK;
+     u32 i;
+ 
++    for (i = 0; i < sCfg->numSpans; i++)
++    {
++        if (x >= sCfg->spans[i].hashStart && x < sCfg->spans[i].hashEnd)
++            return &sCfg->spans[i];
++    }
++    return NULL;
++}
++
++// Whether the block at 'addr' holds what hash table 'table' of the span of
++// game block x says x should hold (table 0: written, 1..: the sources).
++static bool32 BlockMatches(u32 addr, u32 x, u32 table)
++{
++    const struct FlasherSpan *sp = SpanOf(x);
++    const u32 *hashes;
++    u32 chunks, first, i;
++
++    if (sp == NULL)
++        return FALSE;
++    chunks = (sp->hashEnd - sp->hashStart) / HASH_CHUNK;
++    hashes = (const u32 *)((const u8 *)sCfg + sp->tablesOffset) + table * chunks;
++    first = (x - sp->hashStart) / HASH_CHUNK;
+     for (i = 0; i < sBlock; i += HASH_CHUNK)
+     {
+-        if (ChunkHash(addr + i) != table[first + i / HASH_CHUNK])
++        if (ChunkHash(addr + i) != hashes[first + i / HASH_CHUNK])
+             return FALSE;
+     }
+     return TRUE;
+@@ -222,13 +250,29 @@ static bool32 BlockMatches(u32 addr, u32 x, const u32 *table)
+ 
+ static u32 BlockState(u32 x)
+ {
+-    if (BlockMatches(x, x, sTargetHash))
++    const struct FlasherSpan *sp = SpanOf(x);
++    u32 t;
++
++    if (BlockMatches(x, x, TABLE_TARGET))
+         return BLOCK_TARGET;
+-    if (BlockMatches(x, x, sOrigHash))
+-        return BLOCK_ORIGINAL;
++    for (t = 1; sp != NULL && t <= sp->numSources; t++)
++    {
++        if (BlockMatches(x, x, t))
++            return BLOCK_SOURCE;
++    }
+     return BLOCK_OTHER;
+ }
+ 
++static u32 SpanFirst(const struct FlasherSpan *sp)
++{
++    return sp->overlayStart & ~(sBlock - 1);
++}
++
++static u32 SpanEnd(const struct FlasherSpan *sp)
++{
++    return (sp->overlayEnd + sBlock - 1) & ~(sBlock - 1);
++}
++
+ static bool32 IdentityOk(void)
+ {
+     u32 h = HASH_BASIS;
+@@ -261,8 +305,15 @@ static void WaitForCart(void)
+ 
+ static u8 TargetByte(u32 addr)
+ {
+-    if (addr >= sCfg->overlayStart && addr < sCfg->overlayEnd)
+-        return sNewBytes[addr - sCfg->overlayStart];
++    u32 i;
++
++    for (i = 0; i < sCfg->numSpans; i++)
++    {
++        const struct FlasherSpan *sp = &sCfg->spans[i];
++
++        if (addr >= sp->overlayStart && addr < sp->overlayEnd)
++            return ((const u8 *)sCfg + sp->bytesOffset)[addr - sp->overlayStart];
++    }
+     return ROM8(addr);
+ }
+ 
+@@ -439,7 +490,7 @@ static u16 Stage(u32 x)
+     if (rc != REPRO_OK)
+         return rc;
+     sErrorAddr = s;
+-    if (!BlockMatches(s, x, sTargetHash))
++    if (!BlockMatches(s, x, TABLE_TARGET))
+         return ERR_STAGE_VERIFY;
+     StepDone(x, " copy  ");
+     return REPRO_OK;
+@@ -453,7 +504,7 @@ static u16 Rewrite(u32 x)
+     u16 rc;
+ 
+     sErrorAddr = s;
+-    if (!BlockMatches(s, x, sTargetHash))
++    if (!BlockMatches(s, x, TABLE_TARGET))
+         return ERR_STAGE_VERIFY;
+     StepStart(x, " write ");
+     rc = EraseChecked(x);
+@@ -466,7 +517,7 @@ static u16 Rewrite(u32 x)
+     if (rc != REPRO_OK)
+         return rc;
+     sErrorAddr = x;
+-    if (!BlockMatches(x, x, sTargetHash))
++    if (!BlockMatches(x, x, TABLE_TARGET))
+         return ERR_WRITE_VERIFY;
+     StepDone(x, " write ");
+     return REPRO_OK;
+@@ -500,9 +551,38 @@ static bool32 SpareClean(void)
+     return IsErased(sCfg->stagingAddr, sBlock) && IsErased(sCfg->testAddr - sBlock, 3 * sBlock);
+ }
+ 
+-static u16 WriteAll(u32 first, u32 end)
++static u16 WriteBlock(u32 x)
++{
++    u16 rc;
++
++    sErrorAddr = x;
++    if (BlockState(x) == BLOCK_TARGET)
++    {
++        StepDone(x, " already new");
++        return REPRO_OK;
++    }
++    if (!BlockMatches(sCfg->stagingAddr, x, TABLE_TARGET))
++    {
++        // A block that is in none of the expected states can only come from
++        // an interrupted write, and then the staging block holds its copy.
++        // Without that copy there is nothing safe to do.
++        if (BlockState(x) != BLOCK_SOURCE)
++            return ERR_UNKNOWN_STATE;
++        rc = Stage(x);
++        if (rc != REPRO_OK)
++            rc = Stage(x);
++        if (rc != REPRO_OK)
++            return rc;
++    }
++    rc = Rewrite(x);
++    if (rc != REPRO_OK)
++        rc = Rewrite(x);
++    return rc;
++}
++
++static u16 WriteAll(void)
+ {
+-    u32 x;
++    u32 i, x;
+     u16 rc;
+ 
+     ReproSram_ForgetBank();
+@@ -513,32 +593,16 @@ static u16 WriteAll(u32 first, u32 end)
+         return rc;
+     PrintOk();
+ 
+-    for (x = first; x < end; x += sBlock)
++    for (i = 0; i < sCfg->numSpans; i++)
+     {
+-        sErrorAddr = x;
+-        if (BlockState(x) == BLOCK_TARGET)
+-        {
+-            StepDone(x, " already new");
+-            continue;
+-        }
+-        if (!BlockMatches(sCfg->stagingAddr, x, sTargetHash))
++        const struct FlasherSpan *sp = &sCfg->spans[i];
++
++        for (x = SpanFirst(sp); x < SpanEnd(sp); x += sBlock)
+         {
+-            // A block that is neither the original nor the new data can only
+-            // come from an interrupted write, and then the staging block holds
+-            // its copy. Without that copy there is nothing safe to do.
+-            if (BlockState(x) != BLOCK_ORIGINAL)
+-                return ERR_UNKNOWN_STATE;
+-            rc = Stage(x);
+-            if (rc != REPRO_OK)
+-                rc = Stage(x);
++            rc = WriteBlock(x);
+             if (rc != REPRO_OK)
+                 return rc;
+         }
+-        rc = Rewrite(x);
+-        if (rc != REPRO_OK)
+-            rc = Rewrite(x);
+-        if (rc != REPRO_OK)
+-            return rc;
+     }
+ 
+     Con_Print("Erase spare area again");
+@@ -549,6 +613,28 @@ static u16 WriteAll(u32 first, u32 end)
+     return REPRO_OK;
+ }
+ 
++// Counts the blocks of all spans in each state.
++static void CountBlocks(u32 *total, u32 *target, u32 *other)
++{
++    u32 i, x, state;
++
++    *total = *target = *other = 0;
++    for (i = 0; i < sCfg->numSpans; i++)
++    {
++        const struct FlasherSpan *sp = &sCfg->spans[i];
++
++        for (x = SpanFirst(sp); x < SpanEnd(sp); x += sBlock)
++        {
++            state = BlockState(x);
++            (*total)++;
++            if (state == BLOCK_TARGET)
++                (*target)++;
++            else if (state == BLOCK_OTHER)
++                (*other)++;
++        }
++    }
++}
++
+ static const char *ErrorText(u16 rc)
+ {
+     switch (rc)
+@@ -616,8 +702,8 @@ static void ShowChipIds(void)
+ void AgbMain(void)
+ {
+     const struct ReproCart *probed;
+-    u32 first, end, x, i;
+-    u32 newBlocks, origBlocks, total;
++    u32 x, i;
++    u32 newBlocks, total, other;
+     u16 rc;
+ 
+     REG_WAITCNT = 0x4014; // the same as Emerald: ROM 3/1 wait states, SRAM 4
+@@ -672,26 +758,37 @@ void AgbMain(void)
+         Fail("This block layout is not\nsupported. Nothing was\nwritten.\n");
+     sPiece = sBlock < PIECE_MAX ? sBlock : PIECE_MAX;
+ 
+-    first = sCfg->overlayStart & ~(sBlock - 1);
+-    end = (sCfg->overlayEnd + sBlock - 1) & ~(sBlock - 1);
+-    newBlocks = origBlocks = total = 0;
+-    for (x = first; x < end; x += sBlock)
++    for (i = 0; i < sCfg->numSpans; i++)
+     {
+-        u32 state = BlockState(x);
++        const struct FlasherSpan *sp = &sCfg->spans[i];
++        u32 n = 0, newCount = 0, srcCount = 0, state;
+ 
+-        total++;
+-        if (state == BLOCK_TARGET)
+-            newBlocks++;
+-        else if (state == BLOCK_ORIGINAL)
+-            origBlocks++;
++        for (x = SpanFirst(sp); x < SpanEnd(sp); x += sBlock)
++        {
++            state = BlockState(x);
++            n++;
++            if (state == BLOCK_TARGET)
++                newCount++;
++            else if (state == BLOCK_SOURCE)
++                srcCount++;
++        }
++        Con_Print(sp->name);
++        Con_Print(": ");
++        if (newCount == n)
++        {
++            Con_SetColor(COLOR_GREEN);
++            Con_Print("done\n");
++            Con_SetColor(COLOR_WHITE);
++        }
++        else
++        {
++            // Blocks in no expected state come from a run that was stopped.
++            Con_Print(newCount + srcCount == n ? "to write\n" : "half written\n");
++        }
+     }
+-
+-    Con_Print("Link program: ");
++    CountBlocks(&total, &newBlocks, &x);
+     if (newBlocks == total)
+     {
+-        Con_SetColor(COLOR_GREEN);
+-        Con_Print("new\n");
+-        Con_SetColor(COLOR_WHITE);
+         if (SpareClean())
+         {
+             Con_Print("\nAlready written. Nothing to\ndo.\n");
+@@ -702,12 +799,9 @@ void AgbMain(void)
+     }
+     else
+     {
+-        Con_Print(origBlocks == total ? "original\n" : "half written\n");
+         Con_Print("Will rewrite ");
+-        Con_Hex(first, 6);
+-        Con_Putc('-');
+-        Con_Hex(end - 1, 6);
+-        Con_Putc('\n');
++        Con_Dec(total - newBlocks);
++        Con_Print(total - newBlocks == 1 ? " block\n" : " blocks\n");
+     }
+     Con_Print("Save at ");
+     Con_Hex(sCfg->saveAddr, 6);
+@@ -728,7 +822,7 @@ void AgbMain(void)
+ 
+     for (;;)
+     {
+-        rc = WriteAll(first, end);
++        rc = WriteAll();
+         if (rc == REPRO_OK)
+             break;
+         Con_Putc('\n');
+@@ -749,12 +843,8 @@ void AgbMain(void)
+         Con_SetColor(COLOR_WHITE);
+         if (IsFatal(rc))
+         {
+-            for (x = first; x < end; x += sBlock)
+-            {
+-                if (BlockState(x) == BLOCK_OTHER)
+-                    break;
+-            }
+-            if (x >= end)
++            CountBlocks(&total, &newBlocks, &other);
++            if (other == 0)
+                 Con_Print("Game data is intact.\n");
+             Fail("Stopped. Turn the GBA off\nand report this screen.\n");
+         }
+diff --git a/repro_tools/flasher/savewriter.c b/repro_tools/flasher/savewriter.c
+index b305c65..90694d0 100644
+--- a/repro_tools/flasher/savewriter.c
++++ b/repro_tools/flasher/savewriter.c
+@@ -72,7 +72,7 @@ static bool32 ConfigOk(void)
+         return FALSE;
+     if (gHashWords((const u8 *)sCfg + 0x20, sCfg->totalSize - 0x20, HASH_BASIS) != sCfg->bodyHash)
+         return FALSE;
+-    if (sCfg->numIdRanges > MAX_ID_RANGES || sCfg->saveSize != SAVE_SIZE
++    if (sCfg->numIdRanges > SAVEWRITER_ID_RANGES || sCfg->saveSize != SAVE_SIZE
+      || sizeof(struct SaveWriterConfig) + sCfg->saveSize > sCfg->totalSize
+      || (sCfg->saveAddr & (SECTOR_SIZE - 1)) || sCfg->areaStart > sCfg->saveAddr
+      || sCfg->areaEnd < sCfg->saveAddr + sCfg->saveSize)
+diff --git a/repro_tools/flasher/savewriter_config.h b/repro_tools/flasher/savewriter_config.h
+index 60689c0..dcff580 100644
+--- a/repro_tools/flasher/savewriter_config.h
++++ b/repro_tools/flasher/savewriter_config.h
+@@ -7,6 +7,7 @@
+ 
+ #define SAVEWRITER_MAGIC   0x57564153 // "SAVW"
+ #define SAVEWRITER_VERSION 1
++#define SAVEWRITER_ID_RANGES 6
+ 
+ struct SaveWriterConfig
+ {
+@@ -26,7 +27,7 @@ struct SaveWriterConfig
+     u32 numIdRanges;
+     u32 idHash;
+     // 0x40
+-    u32 idRanges[MAX_ID_RANGES][2];
++    u32 idRanges[SAVEWRITER_ID_RANGES][2];
+     u32 pad2[4];
+     // 0x80: the save, saveSize bytes
+ };
+diff --git a/repro_tools/flasher_code.bin b/repro_tools/flasher_code.bin
+index 320b09cb8e828177e769b3da41f97cf12bc2b380..1fd6fb4d362a122e71e497df733f39333ab12d56 100755
+GIT binary patch
+delta 3929
+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
+I>nh9s4eRk6zW@LL
+
+delta 3386
+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
+A<p2Nx
+
+diff --git a/repro_tools/linkhook.bin b/repro_tools/linkhook.bin
+index 1b81fe18d541c884e2a237008eac3df90bb3cd51..04ce19f79780c372920e718d42029b1298441c4a 100755
+GIT binary patch
+delta 390
+zcmaFi_{5R(s=^!&4}X8}Clfi%>%~17GTNLRE;Xp{XK8Sop<pQE=q&8PBe66?*h5P~
+zA@hKwU`C^p?!^Zg4T_yC4ibStp4vsl3=5h6-;e)K%;<2EzsTvKDZ%N%k$_6GIrAlm
+zJb2(RhvR_d9F8rF3`}c)nB&9zr+a|3ff7)hk%5befx#z&(ag>D;KZw{(o25mByc@g
+z!@$7go@|!72dIzPqs58w;{Wf{CyO%r)(d24d2%>td3HGQTolOA^p<eY^yCD(f%TF=
+zhJ?cmMMq~f4_*ld1%U(xUGobK3Jolong74r|6iHe;iP|2!CTQw(MMAz!EiB9heU-y
+z0i!Xa(PF2cmt{SgoLFu!C<_-b8Z|lnzA5Elp~UdP@dty-i_8`$p-bX^j~Fy$6ed4p
+zR5VxmQLu+`4}&`c1JM1<3=IGOgS-GDVSZf!^c%wqW~LQD_nZG`W?}&16_X8_gc$=j
+JyD}}70{{%`e>DIA
+
+delta 408
+zcmaFj_`;F%p~4&v4}X8}7ZW+n>m@xHGTNNnE;Xp{XK8Sop<pQE=q&2NBe66?)I&=`
+zA@hKwU`C^p@x=!j4T_yC4ibStp3X(Z3=5h6-;e)K%;<1Zy~ypMDZ%Z*kpQPXd4N0~
+z54Hpj!w=3J3E~eJ7@j!H;W%PBhhqyP1JfEH=J+uG=^jP~F(wnGIUFDUGc!f__<4T;
+z(u`(quDd6mRFz)vLnndj!5RhzCii5s)B`}h%pNUHj2HiZpE#M5(YIbOL(8MliSMG8
+zM_>j6&{dq50x}LbPXw}9E(T`IP;his@!*wUP!LF9&^5o%pwPgQnfd>_<^PqL9Zvce
+z<-Fy+<b5<{5)2nRv0jp>5GY_YW;9yt^z*W`N0SrF4F+Z50!E`Ir{6avJS>zLKG^<X
+zP<fHr;v{rQ)bA04hK$1GtBi`yaz6_8Fz#V+XJCMN0p`y&KyNX;U}jnabhkOsTMR%9
+cVskLee=6`_{~`DN0(V9a2KU&_j!cW?0DmQmu>b%7
+
+diff --git a/repro_tools/make_flasher.py b/repro_tools/make_flasher.py
+index 99239c6..8de69ea 100644
+--- a/repro_tools/make_flasher.py
++++ b/repro_tools/make_flasher.py
+@@ -2,17 +2,21 @@
+ """Builds the Emerald link flasher for your cart.
+ 
+ The flasher is a GBA multiboot program. Sent to the GBA over the GameCube
+-link cable with your repro Emerald cart inserted, it rewrites the copy of the
+-Colosseum link program inside the cart's ROM with the repro build, so the
+-cart no longer needs a patched disc or a cart writer.
++link cable with your repro Emerald cart inserted, it writes two things into
++the cart's ROM so that unmodified discs work with it:
++  - the repro build of the Colosseum link program, over Emerald's own copy
++    (the same as the v0.2 flasher; already done if you ran that one);
++  - the XD link hook: a few bytes of Emerald's link code, and the hook and
++    XD save code (linkhook.bin) in unused space after the Colosseum program.
+ 
+ usage:
+   make_flasher.py ROM_DUMP colosseum-mb-repro.bps OUTPUT.gba
+ 
+-ROM_DUMP must be a dump of the very cart you will flash. The flasher checks
+-the cart against it and refuses to write to anything else. The dump needs to
+-be current only outside the save area, so an older dump of the same cart is
+-fine. Standard library only. ROM_DUMP itself is never modified.
++ROM_DUMP must be a dump of the very cart you will flash, taken before any
++flash (or of an identical cart). The flasher checks the cart against it and
++refuses to write to anything else. The dump needs to be current only outside
++the save area, so an older dump of the same cart is fine. Standard library
++only. ROM_DUMP itself is never modified.
+ """
+ import hashlib
+ import os
+@@ -20,18 +24,22 @@ import struct
+ import sys
+ 
+ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'xdlink'))
+ import bps                                              # noqa: E402
++import emerald_hook                                     # noqa: E402
+ from emerald_rom import PROGRAM_SIZE, find_program, find_saves   # noqa: E402
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+ CODE_PATH = os.path.join(HERE, 'flasher_code.bin')
++HOOK_PATH = os.path.join(HERE, 'linkhook.bin')
+ 
+ MAGIC = 0x48534C46          # "FLSH"
+-VERSION = 1
++VERSION = 2
+ HASH_CHUNK = 0x1000
+ HASH_BASIS = 0x811C9DC5
+-MAX_ID_RANGES = 6
+-CONFIG_SIZE = 0x80
++MAX_ID_RANGES = 8
++MAX_SPANS = 4
++CONFIG_SIZE = 0x140
+ BIG_BLOCK = 0x40000         # largest erase block the flasher accepts
+ SAVE_SIZE = 0x20000
+ GAME_AREA = 0x1000000       # Emerald uses the first 16 MiB of the cart
+@@ -58,10 +66,12 @@ def subtract(ranges, cut):
+     return out
+ 
+ 
+-def plan_areas(rom, save, hash_lo, hash_hi):
++def plan_areas(rom, save, hash_lo, hash_hi, more=()):
+     """Picks the unused areas the flasher (and the save writer) may use, and
+     the ranges the identity check covers. [hash_lo, hash_hi) is the 256 KiB
+-    aligned area around the link program, which the flasher rewrites."""
++    aligned area around the link program, which the flasher rewrites; 'more'
++    lists further such areas."""
++    written = [(hash_lo, hash_hi)] + list(more)
+     save_lo = save & ~(BIG_BLOCK - 1)
+     save_hi = (save + SAVE_SIZE + BIG_BLOCK - 1) & ~(BIG_BLOCK - 1)
+     # Spare area: chunks that are all 0xFF in the dump.
+@@ -71,7 +81,7 @@ def plan_areas(rom, save, hash_lo, hash_hi):
+     def all_free(a, b):
+         if a < 0 or b > GAME_AREA:
+             return False
+-        if b > save_lo and a < save_hi or b > hash_lo and a < hash_hi:
++        if b > save_lo and a < save_hi or any(b > lo and a < hi for lo, hi in written):
+             return False
+         return all(free[a // HASH_CHUNK:b // HASH_CHUNK])
+ 
+@@ -91,59 +101,102 @@ def plan_areas(rom, save, hash_lo, hash_hi):
+ 
+     # The identity check covers everything that should never change.
+     ranges = [(0, save_lo)]
+-    for cut in ((hash_lo, hash_hi), (test - 2 * BIG_BLOCK, test + 2 * BIG_BLOCK), (staging, staging + BIG_BLOCK)):
++    for cut in written + [(test - 2 * BIG_BLOCK, test + 2 * BIG_BLOCK), (staging, staging + BIG_BLOCK)]:
+         ranges = subtract(ranges, cut)
+     if len(ranges) > MAX_ID_RANGES:
+         raise SystemExit('error: too many identity ranges')
+     return test, staging, ranges
+ 
+ 
+-def build(rom, patch, code):
++def spans_of(rom, target):
++    """Groups the bytes where target differs from rom into spans (bytes less
++    than 256 KiB apart go together), each with its 256 KiB aligned area."""
++    runs = []
++    for c in range(0, len(rom), HASH_CHUNK):
++        if rom[c:c + HASH_CHUNK] == target[c:c + HASH_CHUNK]:
++            continue
++        for j in range(c, c + HASH_CHUNK):
++            if rom[j] != target[j]:
++                if runs and j - runs[-1][1] < BIG_BLOCK:
++                    runs[-1][1] = j + 1
++                else:
++                    runs.append([j, j + 1])
++    spans = [(d0, d1, d0 & ~(BIG_BLOCK - 1), (d1 + BIG_BLOCK - 1) & ~(BIG_BLOCK - 1)) for d0, d1 in runs]
++    for (_, _, _, hi), (_, _, lo, _) in zip(spans, spans[1:]):
++        if lo < hi:
++            raise SystemExit('error: areas to write too close together')
++    return spans
++
++
++def chunk_hashes(data, lo, hi):
++    return [fnv_words(data[a:a + HASH_CHUNK]) for a in range(lo, hi, HASH_CHUNK)]
++
++
++def build(rom, patch, code, hook):
+     if len(rom) < GAME_AREA:
+         raise SystemExit('error: the dump is smaller than 16 MiB')
+     if rom[0xAC:0xB0] != b'BPEE':
+         raise SystemExit('error: game code is %r, not BPEE (US Emerald)' % bytes(rom[0xAC:0xB0]))
+ 
++    # What the cart looks like after the v0.2 flasher (Colosseum program
++    # only), and after this one.
+     pos = find_program(rom)
+-    clean = bytes(rom[pos:pos + PROGRAM_SIZE])
+-    new = bps.apply(clean, patch)
+-    diff = [i for i in range(PROGRAM_SIZE) if clean[i] != new[i]]
+-    if not diff:
+-        raise SystemExit('error: the patch does not change the program')
+-    d0, d1 = pos + diff[0], pos + diff[-1] + 1
+-    new_bytes = new[diff[0]:diff[-1] + 1]
++    new = bps.apply(bytes(rom[pos:pos + PROGRAM_SIZE]), patch)
++    if len(new) != PROGRAM_SIZE:
++        raise SystemExit('error: the patch gives a program of the wrong size')
++    colosseum = bytearray(rom)
++    colosseum[pos:pos + PROGRAM_SIZE] = new
++    try:
++        target = emerald_hook.apply(colosseum, hook)
++    except ValueError as e:
++        raise SystemExit('error: %s' % e)
+ 
+     saves = find_saves(rom)
+     if len(saves) != 1:
+         raise SystemExit('error: expected one save area in the dump, found %d' % len(saves))
+     save = saves[0]
+-
+-    hash_lo = d0 & ~(BIG_BLOCK - 1)
+-    hash_hi = (d1 + BIG_BLOCK - 1) & ~(BIG_BLOCK - 1)
+-    # Whatever the batteryless code may erase around the save is off limits.
+     save_lo = save & ~(BIG_BLOCK - 1)
+     save_hi = (save + SAVE_SIZE + BIG_BLOCK - 1) & ~(BIG_BLOCK - 1)
+-    if hash_hi > save_lo and hash_lo < save_hi:
+-        raise SystemExit('error: the program is too close to the save area')
+ 
+-    test, staging, ranges = plan_areas(rom, save, hash_lo, hash_hi)
++    spans = spans_of(rom[:GAME_AREA], target[:GAME_AREA])
++    if not spans or len(spans) > MAX_SPANS:
++        raise SystemExit('error: %d areas to write' % len(spans))
++    for d0, d1, lo, hi in spans:
++        # Whatever the batteryless code may erase around the save is off limits.
++        if hi > save_lo and lo < save_hi:
++            raise SystemExit('error: an area to write is too close to the save area')
++    test, staging, ranges = plan_areas(rom, save, spans[0][2], spans[0][3], [(lo, hi) for _, _, lo, hi in spans[1:]])
+     id_hash = HASH_BASIS
+     for a, b in ranges:
+         id_hash = fnv_words(rom[a:b], id_hash)
+ 
+-    target = bytearray(rom[hash_lo:hash_hi])
+-    target[d0 - hash_lo:d1 - hash_lo] = new_bytes
+-    orig_hashes = [fnv_words(rom[a:a + HASH_CHUNK]) for a in range(hash_lo, hash_hi, HASH_CHUNK)]
+-    target_hashes = [fnv_words(target[a:a + HASH_CHUNK]) for a in range(0, hash_hi - hash_lo, HASH_CHUNK)]
+-
+-    body = struct.pack('<12I', struct.unpack('<I', b'BPEE')[0], pos, len(new.rstrip(b'\0')), save,
+-                       d0, d1, hash_lo, hash_hi, test, staging, len(ranges), id_hash)
++    span_hdr = b''
++    tail = b''
++    base = CONFIG_SIZE
++    for d0, d1, lo, hi in spans:
++        sources = [rom]
++        if colosseum[lo:hi] != rom[lo:hi]:
++            sources.append(colosseum)
++        tables = chunk_hashes(target, lo, hi)
++        for src in sources:
++            tables += chunk_hashes(src, lo, hi)
++        tables_off = base + len(tail)
++        tail += struct.pack('<%dI' % len(tables), *tables)
++        bytes_off = base + len(tail)
++        tail += bytes(target[d0:d1])
++        tail += b'\0' * (-len(tail) % 4)
++        name = b'Link programs' if d0 <= pos + PROGRAM_SIZE and pos <= d1 else b'Link code'
++        span_hdr += name.ljust(16, b'\0') + struct.pack('<8I', d0, d1, lo, hi, bytes_off, tables_off, len(sources), 0)
++    span_hdr += bytes(0x30 * (MAX_SPANS - len(spans)))
++
++    body = struct.pack('<8I', struct.unpack('<I', b'BPEE')[0], save, test, staging, len(ranges), id_hash, len(spans), 0)
++    if len(ranges) > MAX_ID_RANGES:
++        raise SystemExit('error: too many identity ranges')
+     for i in range(MAX_ID_RANGES):
+         body += struct.pack('<II', *(ranges[i] if i < len(ranges) else (0, 0)))
++    body += span_hdr
+     assert 0x20 + len(body) == CONFIG_SIZE
+-    body += struct.pack('<%dI' % len(orig_hashes), *orig_hashes)
+-    body += struct.pack('<%dI' % len(target_hashes), *target_hashes)
+-    body += new_bytes
++    body += tail
+     body += b'\0' * (-(0x20 + len(body)) % 32)
+     total = 0x20 + len(body)
+     config = struct.pack('<8I', MAGIC, VERSION, total, fnv_words(body), 0, 0, 0, 0) + body
+@@ -160,8 +213,8 @@ def build(rom, patch, code):
+         raise SystemExit('error: flasher is %d bytes, over the 256 KiB multiboot limit' % len(image))
+ 
+     info = {
+-        'program': pos, 'new_size': len(new.rstrip(b'\0')), 'overlay': (d0, d1), 'save': save,
+-        'test': test, 'staging': staging, 'ranges': ranges, 'size': len(image),
++        'program': pos, 'spans': spans, 'save': save, 'test': test, 'staging': staging,
++        'ranges': ranges, 'size': len(image), 'target': bytes(target), 'colosseum': bytes(colosseum),
+     }
+     return bytes(image), info
+ 
+@@ -174,9 +227,11 @@ def main(argv):
+     if os.path.abspath(rom_path) == os.path.abspath(out_path):
+         raise SystemExit('error: write the flasher to a new file')
+     rom = open(rom_path, 'rb').read()
+-    image, info = build(rom, open(patch_path, 'rb').read(), open(CODE_PATH, 'rb').read())
++    image, info = build(rom, open(patch_path, 'rb').read(), open(CODE_PATH, 'rb').read(), open(HOOK_PATH, 'rb').read())
+     open(out_path, 'wb').write(image)
+-    print('Colosseum link program at 0x%06X, new bytes 0x%06X-0x%06X' % (info['program'], *info['overlay']))
++    print('Colosseum link program at 0x%06X' % info['program'])
++    for d0, d1, lo, hi in info['spans']:
++        print('writes 0x%06X-0x%06X' % (d0, d1))
+     print('save area at 0x%06X (never written)' % info['save'])
+     print('spare area: copy at 0x%06X, erase test around 0x%06X' % (info['staging'], info['test']))
+     print('wrote %s (%d bytes, SHA-1 %s)' % (out_path, len(image), hashlib.sha1(image).hexdigest()))
+diff --git a/repro_tools/make_save_writer.py b/repro_tools/make_save_writer.py
+index 2927193..b4c9704 100644
+--- a/repro_tools/make_save_writer.py
++++ b/repro_tools/make_save_writer.py
+@@ -8,8 +8,8 @@ batteryless repro cart's save area, replacing the save that is there.
+ usage:
+   make_save_writer.py ROM_DUMP SAVE_FILE OUTPUT.gba
+ 
+-ROM_DUMP is a dump of the cart, made before or after flashing the link
+-program; the save in it doesn't matter. SAVE_FILE is the save to write, for
++ROM_DUMP is a dump of the cart, made before or after flashing; the save in
++it doesn't matter. SAVE_FILE is the save to write, for
+ example one that extract_save.py pulled out of a dump and PKHeX edited.
+ Standard library only; neither input is modified.
+ """
+@@ -19,9 +19,11 @@ import struct
+ import sys
+ 
+ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'xdlink'))
+ import gen3save                                         # noqa: E402
++from emerald_hook import CODE_AT as HOOK_CODE_AT        # noqa: E402
+ from emerald_rom import PROGRAM_SIZE, find_saves        # noqa: E402
+-from make_flasher import (BIG_BLOCK, GAME_AREA, HASH_BASIS, MAX_ID_RANGES,  # noqa: E402
++from make_flasher import (BIG_BLOCK, GAME_AREA, HASH_BASIS,  # noqa: E402
+                           MULTIBOOT_LIMIT, SAVE_SIZE, fnv_words, plan_areas)
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+@@ -30,6 +32,7 @@ CODE_PATH = os.path.join(HERE, 'savewriter_code.bin')
+ MAGIC = 0x57564153          # "SAVW"
+ VERSION = 1
+ CONFIG_SIZE = 0x80
++MAX_ID_RANGES = 6
+ 
+ 
+ def program_area(rom):
+@@ -66,8 +69,13 @@ def build(rom, save, code):
+     if rom[area_lo:save_addr].strip(b'\xff') or rom[save_addr + SAVE_SIZE:area_hi].strip(b'\xff'):
+         raise SystemExit('error: the dump has data next to the save area, where an erase could reach')
+ 
++    # The flasher may have rewritten the link program's area and the link code
++    # with the XD hook, so the cart is compared with the dump everywhere else.
+     prog_lo, prog_hi = program_area(rom)
+-    test, _, ranges = plan_areas(rom, save_addr, prog_lo, prog_hi)
++    hook_lo = HOOK_CODE_AT & ~(BIG_BLOCK - 1)
++    test, _, ranges = plan_areas(rom, save_addr, prog_lo, prog_hi, [(hook_lo, hook_lo + BIG_BLOCK)])
++    if len(ranges) > MAX_ID_RANGES:
++        raise SystemExit('error: too many identity ranges')
+     id_hash = HASH_BASIS
+     for a, b in ranges:
+         id_hash = fnv_words(rom[a:b], id_hash)
+diff --git a/repro_tools/test/flasher_emu_test.py b/repro_tools/test/flasher_emu_test.py
+index cc2c26d..ad75db8 100644
+--- a/repro_tools/test/flasher_emu_test.py
++++ b/repro_tools/test/flasher_emu_test.py
+@@ -204,8 +204,8 @@ class Case:
+     def allowed_erase(self, start):
+         info = self.info
+         block = lib.SimEraseBlock()
+-        areas = [(0x980000, 0xA00000), (info['staging'], info['staging'] + 0x40000),
+-                 (info['test'] - 0x80000, info['test'] + 0x80000)]
++        areas = [(lo, hi) for _, _, lo, hi in info['spans']] + [
++            (info['staging'], info['staging'] + 0x40000), (info['test'] - 0x80000, info['test'] + 0x80000)]
+         return any(a <= start and start + block <= b for a, b in areas)
+ 
+     def common_checks(self, runs):
+@@ -281,18 +281,12 @@ def main(argv):
+     dump = dump + b'\xff' * (ROM_SIZE - len(dump))
+     patch = open(os.path.join(TOOLS, 'colosseum-mb-repro.bps'), 'rb').read()
+     code = open(os.path.join(TOOLS, 'flasher', 'flasher_code.bin'), 'rb').read()
+-    image, info = make_flasher.build(dump, patch, code)
+-    d0, d1 = info['overlay']
+-    pos = info['program']
+-    import bps
+-    from emerald_rom import PROGRAM_SIZE
+-    new = bps.apply(dump[pos:pos + PROGRAM_SIZE], patch)
+-    expected = bytearray(dump)
+-    expected[d0:d1] = new[d0 - pos:d1 - pos]
+-    expected = bytes(expected)
++    hook = open(os.path.join(TOOLS, 'linkhook.bin'), 'rb').read()
++    image, info = make_flasher.build(dump, patch, code, hook)
++    expected = info['target'] + dump[len(info['target']):]
+     c = Case(dump, image, info, expected)
+-    print('flasher image %d bytes; new bytes 0x%X-0x%X; spare 0x%X, test 0x%X' % (
+-        len(image), d0, d1, info['staging'], info['test']))
++    print('flasher image %d bytes; writes %s; spare 0x%X, test 0x%X' % (
++        len(image), ', '.join('0x%X-0x%X' % (d0, d1) for d0, d1, _, _ in info['spans']), info['staging'], info['test']))
+ 
+     def want(name):
+         return not only or name in only
+@@ -318,6 +312,23 @@ def main(argv):
+         check((stats().erases, stats().programs) == s0, 'second run wrote to the cart')
+         check(bytes(rom_view()) == expected, 'second run changed the ROM')
+ 
++    if want('v02'):
++        print('cart flashed with v0.2 (Colosseum program only) before')
++        v02 = info['colosseum'] + dump[len(info['colosseum']):]
++        for board, eb in (('amd_swapped', 0x20000), ('intel_buffered', 0x40000), ('amd_swapped', None)):
++            c.setup(board, eb, rom=v02)
++            r = Run(c.image).run()
++            d = first_diff(bytes(rom_view()), c.expected)
++            erased = sorted(set(r.erased))
++            check(r.finished == 0 and d is None, '%s: code %s, ROM differs at %s\n%s' % (board, r.finished, d, r.screen()))
++            c.common_checks([r])
++            print('    %s, %s blocks: erased %s' % (board, '%d KiB' % (lib.SimEraseBlock() >> 10), ' '.join('%X' % e for e in erased)))
++        print('\n'.join('    | ' + l for l in r.screen().splitlines()))
++        # the block of the program area already written by v0.2 is left alone (128 KiB blocks)
++        c.setup('amd_swapped', 0x20000, rom=v02)
++        r = Run(c.image).run()
++        check(0x9A0000 not in r.erased, 'the block v0.2 already wrote was erased again')
++
+     if want('save'):
+         print('save area changed since the dump (the user kept playing)')
+         played = bytearray(dump)
+@@ -326,7 +337,8 @@ def main(argv):
+         c.setup('intel_buffered', 0x40000, rom=bytes(played))
+         r = Run(c.image).run()
+         want_rom = bytearray(played)
+-        want_rom[d0:d1] = expected[d0:d1]
++        for d0, d1, _, _ in info['spans']:
++            want_rom[d0:d1] = expected[d0:d1]
+         d = first_diff(bytes(rom_view()), bytes(want_rom))
+         check(r.finished == 0 and d is None, 'code %s, ROM differs at %s' % (r.finished, d))
+         c.common_checks([r])
+diff --git a/repro_tools/test/savewriter_emu_test.py b/repro_tools/test/savewriter_emu_test.py
+index d9d9a80..47fb7b5 100644
+--- a/repro_tools/test/savewriter_emu_test.py
++++ b/repro_tools/test/savewriter_emu_test.py
+@@ -89,22 +89,21 @@ def main(argv):
+         if board == 'amd_swapped' and block == 0x20000 and ok:
+             print('\n'.join('    | ' + l for l in r.screen().splitlines()))
+ 
+-    print('cart already flashed with the link program')
++    print('cart already flashed (v0.2: Colosseum program; v0.3: also the XD hook)')
+     patch = open(os.path.join(fe.TOOLS, 'colosseum-mb-repro.bps'), 'rb').read()
+     flasher_code = open(os.path.join(fe.TOOLS, 'flasher', 'flasher_code.bin'), 'rb').read()
+-    _, finfo = make_flasher.build(dump, patch, flasher_code)
+-    import bps
+-    from emerald_rom import PROGRAM_SIZE
+-    pos = finfo['program']
+-    new_prog = bps.apply(dump[pos:pos + PROGRAM_SIZE], patch)
+-    flashed = dump[:pos] + new_prog + dump[pos + PROGRAM_SIZE:]
+-    c.setup('amd_swapped', 0x20000, rom=flashed)
+-    r = c.run()
+-    check(r.finished == 0 and 'Done.' in r.screen(), 'did not finish on a flashed cart:\n' + r.screen())
+-    c.checks([r], flashed[:info['save']] + new_save + flashed[info['save'] + len(new_save):])
+-    # A save writer built from a dump made after flashing works the same.
+-    image2, _ = make_save_writer.build(flashed, new_save, code)
+-    check(image2 == image, 'a dump made after flashing gives a different save writer')
++    hook = open(os.path.join(fe.TOOLS, 'linkhook.bin'), 'rb').read()
++    _, finfo = make_flasher.build(dump, patch, flasher_code, hook)
++    for label, flashed in (('v0.2', finfo['colosseum']), ('v0.3', finfo['target'])):
++        flashed = flashed + dump[len(flashed):]
++        c.setup('amd_swapped', 0x20000, rom=flashed)
++        r = c.run()
++        check(r.finished == 0 and 'Done.' in r.screen(), '%s: did not finish on a flashed cart:\n%s' % (label, r.screen()))
++        c.checks([r], flashed[:info['save']] + new_save + flashed[info['save'] + len(new_save):])
++        # A save writer built from a dump made after flashing works the same.
++        image2, _ = make_save_writer.build(flashed, new_save, code)
++        check(image2 == image, '%s: a dump made after flashing gives a different save writer' % label)
++        print('  %s: ok' % label)
+ 
+     print('second run on a written cart')
+     c.setup('amd_swapped', 0x20000)
+diff --git a/repro_tools/test/xd_emu_test.py b/repro_tools/test/xd_emu_test.py
+index f83d870..3273072 100644
+--- a/repro_tools/test/xd_emu_test.py
++++ b/repro_tools/test/xd_emu_test.py
+@@ -287,13 +287,12 @@ def phase1(rom, hook, prog_path, matcher):
+     want += [info['variables'][k] for k in ('programFlashByte', 'programFlashSector', 'eraseFlashChip', 'eraseFlashSector',
+                                             'waitForFlashWrite', 'flashMaxTime', 'flash')]
+     check(list(params) == want, '%s: shim parameters wrong' % name)
+-    check(gba.u32(0x0203FFF0) != 0x4B4E4C58, '%s: marker left behind' % name)
++    check(gba.u32(0x030001C0) == 0, '%s: program index left behind' % name)
+     print('  %s: hook and loader ok (%d calls redirected)' % (name, sum(len(v) for v in info['sites'].values())))
+     return gba, info
+ 
+ 
+ def phase1_others(rom, xd_dir, matcher):
+-    hook_marker = 0x4B4E4C58
+     # Colosseum: the swap Emerald always did.
+     fake = bytearray(open(glob.glob(os.path.join(xd_dir, '*maxcng_english*'))[0], 'rb').read())
+     fake[0xAC:0xB0] = b'Gc6e'
+@@ -315,7 +314,6 @@ def phase1_others(rom, xd_dir, matcher):
+         gba = receive(rom, data)
+         gba.run(INTRO_CASE | 1, 0x020000C0)
+         check(gba.read(0x02000000, len(data)) == data, '%s: changed before running' % label)
+-        check(gba.u32(0x0203FFF0) != hook_marker, '%s: marked' % label)
+         print('  %s: left alone' % label)
+ 
+     # A program that matches when received but not after decompression (here,
+@@ -330,7 +328,7 @@ def phase1_others(rom, xd_dir, matcher):
+     gba.run(0x020000C0, 0x02000000)
+     check(gba.read(SHIM, 16) != open(os.path.join(TOOLS, 'xdlink', 'build', 'shim.bin'), 'rb').read(16),
+           'shim installed for a program that changed')
+-    check(gba.u32(0x0203FFF0) != hook_marker, 'marker left behind after a mismatch')
++    check(gba.u32(0x030001C0) == 0, 'program index left behind after a mismatch')
+     print('  program changed after the check: started without the shim')
+ 
+ 
+diff --git a/repro_tools/xdlink/linkhook.bin b/repro_tools/xdlink/linkhook.bin
+index 1b81fe18d541c884e2a237008eac3df90bb3cd51..04ce19f79780c372920e718d42029b1298441c4a 100755
+GIT binary patch
+delta 390
+zcmaFi_{5R(s=^!&4}X8}Clfi%>%~17GTNLRE;Xp{XK8Sop<pQE=q&8PBe66?*h5P~
+zA@hKwU`C^p?!^Zg4T_yC4ibStp4vsl3=5h6-;e)K%;<2EzsTvKDZ%N%k$_6GIrAlm
+zJb2(RhvR_d9F8rF3`}c)nB&9zr+a|3ff7)hk%5befx#z&(ag>D;KZw{(o25mByc@g
+z!@$7go@|!72dIzPqs58w;{Wf{CyO%r)(d24d2%>td3HGQTolOA^p<eY^yCD(f%TF=
+zhJ?cmMMq~f4_*ld1%U(xUGobK3Jolong74r|6iHe;iP|2!CTQw(MMAz!EiB9heU-y
+z0i!Xa(PF2cmt{SgoLFu!C<_-b8Z|lnzA5Elp~UdP@dty-i_8`$p-bX^j~Fy$6ed4p
+zR5VxmQLu+`4}&`c1JM1<3=IGOgS-GDVSZf!^c%wqW~LQD_nZG`W?}&16_X8_gc$=j
+JyD}}70{{%`e>DIA
+
+delta 408
+zcmaFj_`;F%p~4&v4}X8}7ZW+n>m@xHGTNNnE;Xp{XK8Sop<pQE=q&2NBe66?)I&=`
+zA@hKwU`C^p@x=!j4T_yC4ibStp3X(Z3=5h6-;e)K%;<1Zy~ypMDZ%Z*kpQPXd4N0~
+z54Hpj!w=3J3E~eJ7@j!H;W%PBhhqyP1JfEH=J+uG=^jP~F(wnGIUFDUGc!f__<4T;
+z(u`(quDd6mRFz)vLnndj!5RhzCii5s)B`}h%pNUHj2HiZpE#M5(YIbOL(8MliSMG8
+zM_>j6&{dq50x}LbPXw}9E(T`IP;his@!*wUP!LF9&^5o%pwPgQnfd>_<^PqL9Zvce
+z<-Fy+<b5<{5)2nRv0jp>5GY_YW;9yt^z*W`N0SrF4F+Z50!E`Ir{6avJS>zLKG^<X
+zP<fHr;v{rQ)bA04hK$1GtBi`yaz6_8Fz#V+XJCMN0p`y&KyNX;U}jnabhkOsTMR%9
+cVskLee=6`_{~`DN0(V9a2KU&_j!cW?0DmQmu>b%7
+
+diff --git a/repro_tools/xdlink/linkhook.c b/repro_tools/xdlink/linkhook.c
+index 2bd70b8..e097d0d 100644
+--- a/repro_tools/xdlink/linkhook.c
++++ b/repro_tools/xdlink/linkhook.c
+@@ -24,8 +24,12 @@
+ #define COLOSSEUM_GAME_CODE 0x65366347  // "Gc6e"
+ #define XD_GAME_CODE        0x54534554  // "TEST"
+ #define HASH_BASIS          0x811C9DC5
+-#define MARK_ADDR           0x0203FFF0  // above where the loader puts the compressed program
+-#define MARK_MAGIC          0x4B4E4C58  // "XLNK"
++// Which program LinkHook matched is passed to XdPostLoad in the loader's last
++// word (its epilogue, never reached), which the stub copies to IWRAM with the
++// rest of the loader. Nothing else touches it before XdPostLoad runs.
++#define LOADER_IWRAM        0x03000000
++#define XD_LOADER_INDEX     0x1C0
++#define INDEX_MAGIC         0x584C0000  // "XL" in the upper half
+ 
+ extern const u8 gShimImage[];
+ extern const u8 gShimImageEnd[];
+@@ -61,9 +65,7 @@ static void PrepareXd(void)
+             continue;
+         loader[XD_LOADER_JUMP / 4] = 0xE59FF008;   // ldr pc, [pc, #8]
+         loader[XD_LOADER_SPARE / 4] = (u32)XdPostLoadArm;
+-        ((vu32 *)MARK_ADDR)[0] = MARK_MAGIC;
+-        ((vu32 *)MARK_ADDR)[1] = i;
+-        ((vu32 *)MARK_ADDR)[2] = ~i;
++        loader[XD_LOADER_INDEX / 4] = INDEX_MAGIC | i;
+         return;
+     }
+ }
+@@ -106,13 +108,13 @@ static const u32 sShimCalls[XD_CALL_COUNT] =
+ // decompressed at 0x02000000 and interrupts off. Never returns.
+ void XdPostLoad(void)
+ {
+-    vu32 *mark = (vu32 *)MARK_ADDR;
++    vu32 *mark = (vu32 *)(LOADER_IWRAM + XD_LOADER_INDEX);
+     const struct XdProgram *p = NULL;
+     u32 i;
+ 
+-    if (mark[0] == MARK_MAGIC && mark[1] < gNumXdPrograms && mark[2] == ~mark[1])
+-        p = &gXdPrograms[mark[1]];
+-    mark[0] = 0;
++    if ((*mark & 0xFFFF0000) == INDEX_MAGIC && (*mark & 0xFFFF) < gNumXdPrograms)
++        p = &gXdPrograms[*mark & 0xFFFF];
++    *mark = 0;
+ 
+     if (p != NULL && Hash((const void *)EWRAM, p->decSize) == p->decHash)
+     {
+diff --git a/repro_tools/xdlink/shim.ld b/repro_tools/xdlink/shim.ld
+index 0b227ac..7ed47a4 100644
+--- a/repro_tools/xdlink/shim.ld
++++ b/repro_tools/xdlink/shim.ld
+@@ -1,7 +1,6 @@
+ /* The XD shim runs from the top of EWRAM, above everything XD's programs use
+    (image, .bss and the save blocks they allocate after it; analyze_xd.py
+-   checks this for each program). linkhook.c copies it there. The last 128
+-   bytes stay free for the hook's marker. */
++   checks this for each program). linkhook.c copies it there. */
+ OUTPUT_ARCH(arm)
+ 
+ SECTIONS
+-- 
+2.43.0
+

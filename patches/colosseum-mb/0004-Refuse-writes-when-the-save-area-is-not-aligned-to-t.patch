@@ -1,0 +1,30 @@
+From aafc71d06119c47bb08167ca7f6f9c18b5857282 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 21:10:09 +0800
+Subject: [PATCH 04/14] Refuse writes when the save area is not aligned to the
+ erase stride
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JPQshc9oBXnzvR2E67Khm
+---
+ payload/src/repro/repro_flash.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/payload/src/repro/repro_flash.c b/payload/src/repro/repro_flash.c
+index 389432f..faf1e25 100644
+--- a/payload/src/repro/repro_flash.c
++++ b/payload/src/repro/repro_flash.c
+@@ -72,7 +72,9 @@ static bool32 BeginWriteSession(void)
+     cart = ReproCart_Probe();
+     gReproCartType = cart->type;
+ 
+-    if (!cart->supported)
++    // Erases start at the save offset and cover cart->eraseStride bytes, so
++    // the save must start on that boundary or data before it would be erased.
++    if (!cart->supported || (gReproSaveOffset & (cart->eraseStride - 1)) != 0)
+         result = REPRO_ERR_UNSUPPORTED;
+     else
+         result = ReproImage_Load(gReproSaveOffset);
+-- 
+2.43.0
+

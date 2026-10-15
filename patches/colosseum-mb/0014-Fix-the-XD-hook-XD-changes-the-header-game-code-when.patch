@@ -1,0 +1,720 @@
+From 3e61efcce7a8f2c133222ba0c48beadf9ff6b933 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 22:55:12 +0800
+Subject: [PATCH 14/14] Fix the XD hook: XD changes the header game code when
+ it sends a program
+
+On hardware XD replaced "TEST" at 0xAC with its own value (its loader
+keeps that value and its link code checks for "TEST"), so the v0.5 hook
+never recognised XD's programs. The hook now ignores the header: the
+received program is recognised by its compressed code and loader, the
+decompressed one by everything after its header.
+
+The hook's entry stays where the released v0.5 hook had LinkHook
+(0x089C20D1), through a veneer, so Emerald's link code on a v0.5 cart is
+already right and only the hook's block is rewritten. The flasher (v0.4)
+accepts up to three earlier states per area and make_flasher.py adds the
+v0.5 state from linkhook_v0.5.bin. Tests send XD's programs with the
+header changed as XD does, and update a v0.5 cart with power cuts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JPQshc9oBXnzvR2E67Khm
+---
+ repro_tools/flasher/config.h         |   2 +-
+ repro_tools/flasher/main.c           |   2 +-
+ repro_tools/flasher_code.bin         | Bin 14112 -> 14112 bytes
+ repro_tools/linkhook.bin             | Bin 8368 -> 8608 bytes
+ repro_tools/linkhook_v0.5.bin        | Bin 0 -> 8368 bytes
+ repro_tools/make_flasher.py          |  22 ++++++++++++++-----
+ repro_tools/test/flasher_emu_test.py |  31 ++++++++++++++++++++++++++-
+ repro_tools/test/xd_emu_test.py      |  15 +++++++++++--
+ repro_tools/xdlink/analyze_xd.py     |  11 +++++-----
+ repro_tools/xdlink/linkhook.bin      | Bin 8368 -> 8608 bytes
+ repro_tools/xdlink/linkhook.c        |  21 ++++++++++--------
+ repro_tools/xdlink/linkhook_asm.s    |  17 ++++++++++++++-
+ repro_tools/xdlink/rom.ld            |   2 ++
+ repro_tools/xdlink/xd_link.h         |   7 +++---
+ repro_tools/xdlink/xd_tables.c       |  24 ++++++++++-----------
+ 15 files changed, 114 insertions(+), 40 deletions(-)
+ create mode 100755 repro_tools/linkhook_v0.5.bin
+
+diff --git a/repro_tools/flasher/config.h b/repro_tools/flasher/config.h
+index d743146..78ef81a 100644
+--- a/repro_tools/flasher/config.h
++++ b/repro_tools/flasher/config.h
+@@ -22,7 +22,7 @@
+ #define HASH_BASIS       0x811C9DC5
+ #define MAX_ID_RANGES    8
+ #define MAX_SPANS        4
+-#define MAX_SOURCES      2
++#define MAX_SOURCES      3
+ 
+ struct FlasherSpan
+ {
+diff --git a/repro_tools/flasher/main.c b/repro_tools/flasher/main.c
+index e276ca8..eb80b2e 100644
+--- a/repro_tools/flasher/main.c
++++ b/repro_tools/flasher/main.c
+@@ -29,7 +29,7 @@
+ #include "cfi.h"
+ #include "config.h"
+ 
+-#define VERSION "v0.3"
++#define VERSION "v0.4"
+ 
+ #define ROM8(off)     (*(vu8 *)(0x08000000 + (off)))
+ #define ROM_ADDR(off) ((const void *)(0x08000000 + (off)))
+diff --git a/repro_tools/flasher_code.bin b/repro_tools/flasher_code.bin
+index 1fd6fb4d362a122e71e497df733f39333ab12d56..4bfe16c03af347f8d391501659ac3f07a6ef830d 100755
+GIT binary patch
+delta 21
+dcmZ3Gw;*rB7bZrg&0m==D>0gEKB*cm2mom*2%`W1
+
+delta 21
+dcmZ3Gw;*rB7bZr=&0m==D=`{xKB*cm2momo2%!J~
+
+diff --git a/repro_tools/linkhook.bin b/repro_tools/linkhook.bin
+index 301beffd4c53f67ecc2c6ebe31da0385f3ea6312..495a4486a706a97d72215c2eb7273660b44df66d 100755
+GIT binary patch
+delta 883
+zcmaKqOH30{6o$_o3QQ_O<BQvN(6)f41XCW0=)%AhW=1Fvbs-vJ@If+cNKG`sSfLW4
+z1zcz@i7ZM0HHIh)ACM4fBAAev;DYjq;KusE;6iQO6crs$OWC@(^Uck7&YAxt^SE@t
+zsSjHGyi!wBIbdZ^%$aP$yzT#o>e?!)JZbgwhS3C}lLve9Op=RC*OqX?StmIN_SK+4
+zFa)>&F9R?FBs_XTs+P*7&<O0#P(ZydR?m8^ojRX%P3p1a3#Cq@l0q9*hai_dm(rCS
+z`cajoC8I(0iABLd)w}0~?v?SF+AcbRCrt*SEv-U}Olq7^D}AsY0WC7FS+Ud_)GKzX
+zSNH~f%@<>gv3rs;wP8odU+U+F5Bd2K0^C%eaBUdLhx?ZUNFmeDPapwYb)=}ed}OXT
+z&?^l}52bK`1VGLkO|HsSla&rJEtsUh?RROW<j^nxC!Z^79KxYm#HZ!ON^xTYX|5@r
+z$x`f169=;}X@S<%<iqH;N?S#y%P!RC-xCvOX^X*43Q55|@#ox5rCro5LgrRCDQFje
+zFPW8M8-&YNA#13qL)<b;*)%bqW*XTSy?>p9aQ3P@_Bl+Q0HA5n<k9EGmJ=8*x@8Y;
+z1}h0%4~9ITC2)Wz`p!fDvO#ma-}KHc69we`wr7XA)^yr3xH3QFB@n`?ZlrfJ2S@uY
+z+u6L)L&p|eH<i2VQirr$;2^iq223@1D9LTD+K?$IDN1MRn@eoXbTvJ4;~b4QE)Ehn
+zkItUmHN$S1J+w1v>ib4xbZQAo%`y5JWdrLFGScf3uk^;7>yUo*e;oCD*_hy=m+y2R
+zUtEJ&UO#gF41r&TlX~XL@X*rSuKpp@dR`SdJWe2DDO_M7ls{fJe%p}eQTC$D3I8o%
+z7k7GS_(4nCt9a)vWEuV?eR9@Q#_#e_`u5bPvAFaiUt?$YBll*OXK7$-y99cs`KV_l
+RUT`0og5AEl8=tYj`w#H$C{X|a
+
+delta 762
+zcmXw%Ur19?9LIlWTe__&^Uv66-s#<xa8apgQ^^N+Ep~C0Q3gUUi)P$G$O0dVW?n_Y
+z^;8@KrG*(I2Q4s6kX&L=q>$*e2Lr=t3JSB<OB*EJ&UAaY_j3-P-}jvFh5Ni|%$6Tv
+z{Yt*2#WBVLXeZ=McJt%a;_gq+m>z-v#V6n>=0SMCaZB0E09(b_nsmGdw+lM{7>){}
+z$){+<c|s3Y5g8H0(x-}9d|Bw_$|JeF3cC$jMoN5^OhP|b5>Y#Lu$oso)x2e&h1EM)
+z#b-6;It!zrM!zy#?^nJ>AZz$16-gnwP{xP1!j#9&ekH*9He{XV-Y=7PsLZU6h5%&t
+z8`kzonv(N<9EwPZA*nKq!eDPbccqmiQHQ>EQDjAh#VsXllH1)+OR^4Avx#)eblpb2
+zms6}jX@Liw>gE1^Gw^k0h})7-7IgP<`AhnX8&J+Ll_Cbg!mw37tP*_SJE9V##DIiq
+zQd7Ij5H}}1`<DXDAdmw{QmSj}o%yIhs{giJ7NAvYCAkdf6VTC(5{9?5QpNh=HIE(f
+zV837*KPkVj$1tb;6BH3d>2V%PF-HbH8?O(Mj|ML`?`m)HFAk)FlD#d1RqJ?^v=w>r
+ziJI?u8L6QXQ(0}WULvugF1>zu4yS`FBM4m7-5tqVB_iX+S7W2HOfYq7Bb5s+t}vBO
+z(rGm67tc%$ro(NNe(HA@e(aH;(Th(z9==@JgZ;jK%CFZEG<OuNlZIk1{;=6^4jK;n
+z3Y4KK1f!kx7P3esXx5%&q>IWyDh=~P)x=fe#dY<+f6b<ok0{U5pCKpO^^+v26z}L_
+olW8eZexb>G71Q&CH91L)Ww7zh&1>7~fdHk3rYB#`Y|;VoKmQZ|fB*mh
+
+diff --git a/repro_tools/linkhook_v0.5.bin b/repro_tools/linkhook_v0.5.bin
+new file mode 100755
+index 0000000000000000000000000000000000000000..301beffd4c53f67ecc2c6ebe31da0385f3ea6312
+GIT binary patch
+literal 8368
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/repro_tools/make_flasher.py b/repro_tools/make_flasher.py
+index 8de69ea..0debbb8 100644
+--- a/repro_tools/make_flasher.py
++++ b/repro_tools/make_flasher.py
+@@ -32,6 +32,9 @@ from emerald_rom import PROGRAM_SIZE, find_program, find_saves   # noqa: E402
+ HERE = os.path.dirname(os.path.abspath(__file__))
+ CODE_PATH = os.path.join(HERE, 'flasher_code.bin')
+ HOOK_PATH = os.path.join(HERE, 'linkhook.bin')
++# Hooks written by earlier flashers, so that a cart flashed with them is
++# recognised and brought up to date.
++PREVIOUS_HOOKS = [os.path.join(HERE, 'linkhook_v0.5.bin')]
+ 
+ MAGIC = 0x48534C46          # "FLSH"
+ VERSION = 2
+@@ -39,6 +42,7 @@ HASH_CHUNK = 0x1000
+ HASH_BASIS = 0x811C9DC5
+ MAX_ID_RANGES = 8
+ MAX_SPANS = 4
++MAX_SOURCES = 3
+ CONFIG_SIZE = 0x140
+ BIG_BLOCK = 0x40000         # largest erase block the flasher accepts
+ SAVE_SIZE = 0x20000
+@@ -132,7 +136,7 @@ def chunk_hashes(data, lo, hi):
+     return [fnv_words(data[a:a + HASH_CHUNK]) for a in range(lo, hi, HASH_CHUNK)]
+ 
+ 
+-def build(rom, patch, code, hook):
++def build(rom, patch, code, hook, previous_hooks=()):
+     if len(rom) < GAME_AREA:
+         raise SystemExit('error: the dump is smaller than 16 MiB')
+     if rom[0xAC:0xB0] != b'BPEE':
+@@ -148,6 +152,7 @@ def build(rom, patch, code, hook):
+     colosseum[pos:pos + PROGRAM_SIZE] = new
+     try:
+         target = emerald_hook.apply(colosseum, hook)
++        earlier = [rom, colosseum] + [emerald_hook.apply(colosseum, h) for h in previous_hooks]
+     except ValueError as e:
+         raise SystemExit('error: %s' % e)
+ 
+@@ -174,9 +179,14 @@ def build(rom, patch, code, hook):
+     tail = b''
+     base = CONFIG_SIZE
+     for d0, d1, lo, hi in spans:
+-        sources = [rom]
+-        if colosseum[lo:hi] != rom[lo:hi]:
+-            sources.append(colosseum)
++        # Every state the area may be in: the dump, and the dump after each
++        # earlier flasher. Already written states need no entry.
++        sources = []
++        for state in earlier:
++            if state[lo:hi] != target[lo:hi] and all(state[lo:hi] != s[lo:hi] for s in sources):
++                sources.append(state)
++        if not sources or len(sources) > MAX_SOURCES:
++            raise SystemExit('error: %d earlier states for 0x%X-0x%X' % (len(sources), lo, hi))
+         tables = chunk_hashes(target, lo, hi)
+         for src in sources:
+             tables += chunk_hashes(src, lo, hi)
+@@ -215,6 +225,7 @@ def build(rom, patch, code, hook):
+     info = {
+         'program': pos, 'spans': spans, 'save': save, 'test': test, 'staging': staging,
+         'ranges': ranges, 'size': len(image), 'target': bytes(target), 'colosseum': bytes(colosseum),
++        'earlier': [bytes(e) for e in earlier[2:]],
+     }
+     return bytes(image), info
+ 
+@@ -227,7 +238,8 @@ def main(argv):
+     if os.path.abspath(rom_path) == os.path.abspath(out_path):
+         raise SystemExit('error: write the flasher to a new file')
+     rom = open(rom_path, 'rb').read()
+-    image, info = build(rom, open(patch_path, 'rb').read(), open(CODE_PATH, 'rb').read(), open(HOOK_PATH, 'rb').read())
++    previous = [open(p, 'rb').read() for p in PREVIOUS_HOOKS if os.path.exists(p)]
++    image, info = build(rom, open(patch_path, 'rb').read(), open(CODE_PATH, 'rb').read(), open(HOOK_PATH, 'rb').read(), previous)
+     open(out_path, 'wb').write(image)
+     print('Colosseum link program at 0x%06X' % info['program'])
+     for d0, d1, lo, hi in info['spans']:
+diff --git a/repro_tools/test/flasher_emu_test.py b/repro_tools/test/flasher_emu_test.py
+index ad75db8..4189b30 100644
+--- a/repro_tools/test/flasher_emu_test.py
++++ b/repro_tools/test/flasher_emu_test.py
+@@ -282,7 +282,8 @@ def main(argv):
+     patch = open(os.path.join(TOOLS, 'colosseum-mb-repro.bps'), 'rb').read()
+     code = open(os.path.join(TOOLS, 'flasher', 'flasher_code.bin'), 'rb').read()
+     hook = open(os.path.join(TOOLS, 'linkhook.bin'), 'rb').read()
+-    image, info = make_flasher.build(dump, patch, code, hook)
++    previous = [open(p, 'rb').read() for p in make_flasher.PREVIOUS_HOOKS]
++    image, info = make_flasher.build(dump, patch, code, hook, previous)
+     expected = info['target'] + dump[len(info['target']):]
+     c = Case(dump, image, info, expected)
+     print('flasher image %d bytes; writes %s; spare 0x%X, test 0x%X' % (
+@@ -329,6 +330,34 @@ def main(argv):
+         r = Run(c.image).run()
+         check(0x9A0000 not in r.erased, 'the block v0.2 already wrote was erased again')
+ 
++    if want('v05'):
++        print('cart flashed with v0.5 before (old XD hook)')
++        v05 = info['earlier'][0] + dump[len(info['earlier'][0]):]
++        for board, eb in (('amd_swapped', 0x20000), ('intel_buffered', 0x40000), ('amd_swapped', None)):
++            c.setup(board, eb, rom=v05)
++            r = Run(c.image).run()
++            d = first_diff(bytes(rom_view()), c.expected)
++            erased = sorted(set(r.erased))
++            check(r.finished == 0 and d is None, '%s: code %s, ROM differs at %s\n%s' % (board, r.finished, d, r.screen()))
++            c.common_checks([r])
++            game = [e for e in erased if not (info['staging'] <= e < info['staging'] + 0x40000 or info['test'] - 0x80000 <= e < info['test'] + 0x80000)]
++            check(all(0x9C0000 <= e < 0xA00000 for e in game), '%s: erased game blocks %s' % (board, game))
++            print('    %s, %d KiB blocks: game blocks erased %s' % (board, lib.SimEraseBlock() >> 10, ' '.join('%X' % e for e in game)))
++        print('\n'.join('    | ' + l for l in r.screen().splitlines()))
++        print('  power cuts while updating a v0.5 cart (amd_swapped, 128 KiB blocks)')
++        c.setup('amd_swapped', 0x20000, rom=v05)
++        Run(c.image).run()
++        total = Run.ops()
++        for n in sorted(set([1, 2, 3, 5, 8] + [total * k // 12 for k in range(1, 12)] + [total - 1])):
++            c.setup('amd_swapped', 0x20000, rom=v05)
++            r1 = Run(c.image, stop_after_ops=n).run()
++            lib.SimPowerCycle()
++            r2 = Run(c.image).run()
++            d = first_diff(bytes(rom_view()), c.expected)
++            ok = check(r1.interrupted and r2.finished == 0 and d is None, 'cut at %d: code %s, ROM differs at %s\n%s' % (n, r2.finished, d, r2.screen()))
++            c.common_checks([r1, r2])
++            print('    cut after %5d of %d ops: %s' % (n, total, 'ok' if ok else 'FAILED'))
++
+     if want('save'):
+         print('save area changed since the dump (the user kept playing)')
+         played = bytearray(dump)
+diff --git a/repro_tools/test/xd_emu_test.py b/repro_tools/test/xd_emu_test.py
+index f5b35c7..ea48d12 100644
+--- a/repro_tools/test/xd_emu_test.py
++++ b/repro_tools/test/xd_emu_test.py
+@@ -263,9 +263,18 @@ def shim_symbols():
+     return syms
+ 
+ 
+-def phase1(rom, hook, prog_path, matcher, tweak=False):
++# XD overwrites the game code in the program's header ("TEST" on the disc)
++# when it sends a program; its loader keeps the value. Any value will do here.
++GC_CODE = b'\x1D\xC3\x5A\x01'
++
++
++def phase1(rom, hook, prog_path, matcher, tweak=False, code=GC_CODE):
+     name = os.path.basename(prog_path)
+-    program = open(prog_path, 'rb').read()
++    program = bytearray(open(prog_path, 'rb').read())
++    if code is not None:
++        program[0xAC:0xB0] = code
++        name += ' (game code %s)' % ('as on disc' if code == b'TEST' else 'set by XD')
++    program = bytes(program)
+     if tweak:
+         # As if the GameCube changed a header byte and sent different padding
+         # after the loader: the hook only looks at what the program needs.
+@@ -286,6 +295,7 @@ def phase1(rom, hook, prog_path, matcher, tweak=False):
+     calls = {'identify': 'Xd_IdentifyFlash', 'read': 'Xd_ReadFlash', 'verify': 'Xd_VerifyFlashSector',
+              'verifyN': 'Xd_VerifyFlashSectorNBytes', 'savePhase': 'Xd_SavePhase'}
+     expect = bytearray(image)
++    expect[0xAC:0xB0] = program[0xAC:0xB0]         # what the loader keeps
+     for kind, sites in info['sites'].items():
+         for s in sites:
+             got = bl_target(ewram[s - 0x02000000:s - 0x02000000 + 4], s)
+@@ -424,6 +434,7 @@ def main(argv):
+     for p in progs:
+         gba, info = phase1(rom, hook, p, m)
+         states[os.path.basename(p)] = (gba, info)
++        phase1(rom, hook, p, m, code=b'TEST')
+     phase1(rom, hook, [p for p in progs if 'maxcng' in p][0], m, tweak=True)
+     phase1_others(rom, argv[2], m)
+ 
+diff --git a/repro_tools/xdlink/analyze_xd.py b/repro_tools/xdlink/analyze_xd.py
+index 7651564..e384f3c 100644
+--- a/repro_tools/xdlink/analyze_xd.py
++++ b/repro_tools/xdlink/analyze_xd.py
+@@ -30,6 +30,7 @@ LOADER_JUMP = 0x1AC        # "bx r5" (r5 = 0x02000000)
+ LOADER_SPARE = 0x1BC       # epilogue that is never reached; holds the new jump target
+ LOADER_LITS = 0x1B4        # blob end, blob start
+ FLASH_LIB_SIZE = 0xC00     # SwitchFlashBank to the end of agb_flash_le
++HEADER_SIZE = 0xC0         # not hashed after decompression: XD changes the game code
+ SHIM_ADDR = 0x0203E800     # where the hook puts the shim (shim.ld)
+ # The programs allocate the save blocks after their .bss: an initial gap and a
+ # gap after each block of up to 60 bytes, two copies of SaveBlock1, SaveBlock2
+@@ -267,16 +268,16 @@ def analyze(path, matcher):
+         raise ValueError('no XD loader found')
+     off, bstart, bend = ld
+     res.update(loaderOffset=off, blobStart=bstart, blobEnd=bend)
+-    # The hook hashes what the program needs as received, from the compressed
+-    # data to the end of the loader: not the header, not trailing padding.
+-    if bstart & 3 or off & 3:
++    # XD overwrites the header's game code when it sends a program, so the hook
++    # hashes only what runs: the compressed program, then the loader.
++    if bstart & 3 or bend & 3 or off & 3:
+         raise ValueError('unaligned blob or loader')
+-    res['recvHash'] = fnv_words(prog[bstart:off + LOADER_SIZE])
++    res['recvHash'] = fnv_words(prog[off:off + LOADER_SIZE], fnv_words(prog[bstart:bend]))
+     img, used = lz77_decode(prog, bstart)
+     if used > bend:
+         raise ValueError('compressed data runs past the blob')
+     res['decSize'] = len(img) // 4 * 4
+-    res['decHash'] = fnv_words(img[:res['decSize']])
++    res['decHash'] = fnv_words(img[HEADER_SIZE:res['decSize']])
+     res['memEnd'] = check_memory(img)
+ 
+     def one(name):
+diff --git a/repro_tools/xdlink/linkhook.bin b/repro_tools/xdlink/linkhook.bin
+index 301beffd4c53f67ecc2c6ebe31da0385f3ea6312..495a4486a706a97d72215c2eb7273660b44df66d 100755
+GIT binary patch
+delta 883
+zcmaKqOH30{6o$_o3QQ_O<BQvN(6)f41XCW0=)%AhW=1Fvbs-vJ@If+cNKG`sSfLW4
+z1zcz@i7ZM0HHIh)ACM4fBAAev;DYjq;KusE;6iQO6crs$OWC@(^Uck7&YAxt^SE@t
+zsSjHGyi!wBIbdZ^%$aP$yzT#o>e?!)JZbgwhS3C}lLve9Op=RC*OqX?StmIN_SK+4
+zFa)>&F9R?FBs_XTs+P*7&<O0#P(ZydR?m8^ojRX%P3p1a3#Cq@l0q9*hai_dm(rCS
+z`cajoC8I(0iABLd)w}0~?v?SF+AcbRCrt*SEv-U}Olq7^D}AsY0WC7FS+Ud_)GKzX
+zSNH~f%@<>gv3rs;wP8odU+U+F5Bd2K0^C%eaBUdLhx?ZUNFmeDPapwYb)=}ed}OXT
+z&?^l}52bK`1VGLkO|HsSla&rJEtsUh?RROW<j^nxC!Z^79KxYm#HZ!ON^xTYX|5@r
+z$x`f169=;}X@S<%<iqH;N?S#y%P!RC-xCvOX^X*43Q55|@#ox5rCro5LgrRCDQFje
+zFPW8M8-&YNA#13qL)<b;*)%bqW*XTSy?>p9aQ3P@_Bl+Q0HA5n<k9EGmJ=8*x@8Y;
+z1}h0%4~9ITC2)Wz`p!fDvO#ma-}KHc69we`wr7XA)^yr3xH3QFB@n`?ZlrfJ2S@uY
+z+u6L)L&p|eH<i2VQirr$;2^iq223@1D9LTD+K?$IDN1MRn@eoXbTvJ4;~b4QE)Ehn
+zkItUmHN$S1J+w1v>ib4xbZQAo%`y5JWdrLFGScf3uk^;7>yUo*e;oCD*_hy=m+y2R
+zUtEJ&UO#gF41r&TlX~XL@X*rSuKpp@dR`SdJWe2DDO_M7ls{fJe%p}eQTC$D3I8o%
+z7k7GS_(4nCt9a)vWEuV?eR9@Q#_#e_`u5bPvAFaiUt?$YBll*OXK7$-y99cs`KV_l
+RUT`0og5AEl8=tYj`w#H$C{X|a
+
+delta 762
+zcmXw%Ur19?9LIlWTe__&^Uv66-s#<xa8apgQ^^N+Ep~C0Q3gUUi)P$G$O0dVW?n_Y
+z^;8@KrG*(I2Q4s6kX&L=q>$*e2Lr=t3JSB<OB*EJ&UAaY_j3-P-}jvFh5Ni|%$6Tv
+z{Yt*2#WBVLXeZ=McJt%a;_gq+m>z-v#V6n>=0SMCaZB0E09(b_nsmGdw+lM{7>){}
+z$){+<c|s3Y5g8H0(x-}9d|Bw_$|JeF3cC$jMoN5^OhP|b5>Y#Lu$oso)x2e&h1EM)
+z#b-6;It!zrM!zy#?^nJ>AZz$16-gnwP{xP1!j#9&ekH*9He{XV-Y=7PsLZU6h5%&t
+z8`kzonv(N<9EwPZA*nKq!eDPbccqmiQHQ>EQDjAh#VsXllH1)+OR^4Avx#)eblpb2
+zms6}jX@Liw>gE1^Gw^k0h})7-7IgP<`AhnX8&J+Ll_Cbg!mw37tP*_SJE9V##DIiq
+zQd7Ij5H}}1`<DXDAdmw{QmSj}o%yIhs{giJ7NAvYCAkdf6VTC(5{9?5QpNh=HIE(f
+zV837*KPkVj$1tb;6BH3d>2V%PF-HbH8?O(Mj|ML`?`m)HFAk)FlD#d1RqJ?^v=w>r
+ziJI?u8L6QXQ(0}WULvugF1>zu4yS`FBM4m7-5tqVB_iX+S7W2HOfYq7Bb5s+t}vBO
+z(rGm67tc%$ro(NNe(HA@e(aH;(Th(z9==@JgZ;jK%CFZEG<OuNlZIk1{;=6^4jK;n
+z3Y4KK1f!kx7P3esXx5%&q>IWyDh=~P)x=fe#dY<+f6b<ok0{U5pCKpO^^+v26z}L_
+olW8eZexb>G71Q&CH91L)Ww7zh&1>7~fdHk3rYB#`Y|;VoKmQZ|fB*mh
+
+diff --git a/repro_tools/xdlink/linkhook.c b/repro_tools/xdlink/linkhook.c
+index ebb2a88..e5dc2d3 100644
+--- a/repro_tools/xdlink/linkhook.c
++++ b/repro_tools/xdlink/linkhook.c
+@@ -14,6 +14,11 @@
+ //     program.
+ //
+ // Anything that does not match exactly is left alone and runs as before.
++//
++// XD overwrites the header's game code ("TEST" on the disc) with its own value
++// when it sends a program, and its loader keeps that value. So nothing here
++// looks at the header: the received program is recognised by its compressed
++// data and loader, and the decompressed one by everything after its header.
+ 
+ #include "repro_types.h"
+ #include "xd_link.h"
+@@ -22,7 +27,6 @@
+ #define EWRAM               0x02000000
+ #define GAME_CODE           (*(vu32 *)(EWRAM + 0xAC))
+ #define COLOSSEUM_GAME_CODE 0x65366347  // "Gc6e"
+-#define XD_GAME_CODE        0x54534554  // "TEST"
+ #define HASH_BASIS          0x811C9DC5
+ // Which program LinkHook matched is passed to XdPostLoad in the loader's last
+ // word (its epilogue, never reached), which the stub copies to IWRAM with the
+@@ -38,10 +42,9 @@ void CpuSet(const void *src, void *dest, u32 control);
+ void XdPostLoadArm(void);
+ void JumpToProgram(void);
+ 
+-static u32 Hash(const void *src, u32 bytes)
++static u32 Hash(const void *src, u32 bytes, u32 h)
+ {
+     const u32 *p = src;
+-    u32 h = HASH_BASIS;
+ 
+     for (bytes /= 4; bytes != 0; bytes--)
+         h = (h ^ *p++) * 0x01000193;
+@@ -50,7 +53,7 @@ static u32 Hash(const void *src, u32 bytes)
+ 
+ static void PrepareXd(void)
+ {
+-    u32 i;
++    u32 i, h;
+ 
+     for (i = 0; i < gNumXdPrograms; i++)
+     {
+@@ -58,10 +61,11 @@ static void PrepareXd(void)
+         u32 *loader = (u32 *)(EWRAM + p->loaderOffset);
+         u32 *lits = (u32 *)((u8 *)loader + XD_LOADER_LITS);
+ 
+-        // The literals are a quick filter; the hash checks the whole program.
++        // The literals are a quick filter; the hash covers what runs.
+         if (lits[0] != EWRAM + p->blobEnd || lits[1] != EWRAM + p->blobStart)
+             continue;
+-        if (Hash((const void *)(EWRAM + p->blobStart), p->loaderOffset + XD_LOADER_SIZE - p->blobStart) != p->recvHash)
++        h = Hash((const void *)(EWRAM + p->blobStart), p->blobEnd - p->blobStart, HASH_BASIS);
++        if (Hash(loader, XD_LOADER_SIZE, h) != p->recvHash)
+             continue;
+         loader[XD_LOADER_JUMP / 4] = 0xE59FF008;   // ldr pc, [pc, #8]
+         loader[XD_LOADER_SPARE / 4] = (u32)XdPostLoadArm;
+@@ -83,8 +87,7 @@ void LinkHook(void)
+         GAME_CODE = code;
+         return;
+     }
+-    if (code == XD_GAME_CODE)
+-        PrepareXd();
++    PrepareXd();
+ }
+ 
+ static void WriteBL(u32 site, u32 target)
+@@ -116,7 +119,7 @@ void XdPostLoad(void)
+         p = &gXdPrograms[*mark & 0xFFFF];
+     *mark = 0;
+ 
+-    if (p != NULL && Hash((const void *)EWRAM, p->decSize) == p->decHash)
++    if (p != NULL && Hash((const void *)(EWRAM + XD_HEADER_SIZE), p->decSize - XD_HEADER_SIZE, HASH_BASIS) == p->decHash)
+     {
+         const u8 *src = gShimImage;
+         u8 *dst = (u8 *)SHIM___shim_start;
+diff --git a/repro_tools/xdlink/linkhook_asm.s b/repro_tools/xdlink/linkhook_asm.s
+index 5e1ef8a..9ca0cda 100644
+--- a/repro_tools/xdlink/linkhook_asm.s
++++ b/repro_tools/xdlink/linkhook_asm.s
+@@ -3,10 +3,25 @@
+ @ linkhook.bin starts with this: what the flasher builder needs to install it.
+     .section .hookhead, "a"
+     .align 2
+-    .word   LinkHook                @ Thumb entry (bit 0 set by the linker)
++    .word   HookEntry               @ Thumb entry (bit 0 set by the linker)
+     .word   0x4B4F4F48              @ "HOOK"
+     .word   __hook_size
+ 
++@ Emerald's link code calls this (through _call_via_r0). It stays at offset
++@ 0xD0, where the released v0.5 had LinkHook (0x089C20D1 is in Emerald's link
++@ code on carts flashed with it), so those carts keep their link code block
++@ and only the hook's block is rewritten.
++    .section .hookentry, "ax"
++    .thumb
++    .align 2
++    .global HookEntry
++    .thumb_func
++HookEntry:
++    ldr     r3, 1f
++    bx      r3
++    .align 2
++1:  .word   LinkHook
++
+     .text
+     .align 2
+ 
+diff --git a/repro_tools/xdlink/rom.ld b/repro_tools/xdlink/rom.ld
+index 07cbab4..5c3feb8 100644
+--- a/repro_tools/xdlink/rom.ld
++++ b/repro_tools/xdlink/rom.ld
+@@ -8,6 +8,8 @@ SECTIONS
+     {
+         __hook_start = .;
+         KEEP(build/linkhook_asm.o(.hookhead));
++        . = __hook_start + 0xD0;
++        KEEP(build/linkhook_asm.o(.hookentry));
+         build/linkhook.o(.text);
+         *(.text .text.*);
+         *(.glue_7) *(.glue_7t);
+diff --git a/repro_tools/xdlink/xd_link.h b/repro_tools/xdlink/xd_link.h
+index 6b7aef1..1a91fbf 100644
+--- a/repro_tools/xdlink/xd_link.h
++++ b/repro_tools/xdlink/xd_link.h
+@@ -13,6 +13,7 @@
+ #define XD_LOADER_JUMP  0x1AC   // "bx r5", the jump to 0x02000000
+ #define XD_LOADER_SPARE 0x1BC   // never reached; holds the new jump target
+ #define XD_LOADER_LITS  0x1B4   // blob end, blob start
++#define XD_HEADER_SIZE  0xC0    // the cart header part, not checked (XD changes it)
+ 
+ struct XdSite
+ {
+@@ -23,12 +24,12 @@ struct XdSite
+ // One XD link program, as sent by the GameCube and after decompression.
+ struct XdProgram
+ {
+-    u32 recvHash;       // hash of [blobStart, loaderOffset + XD_LOADER_SIZE) as received
++    u32 recvHash;       // hash of the compressed program, then the loader, as received
+     u32 loaderOffset;
+     u32 blobStart;      // compressed program, offsets in the received image
+     u32 blobEnd;
+-    u32 decSize;        // bytes hashed after decompression
+-    u32 decHash;
++    u32 decSize;        // size after decompression
++    u32 decHash;        // hash of [XD_HEADER_SIZE, decSize) after decompression
+     u32 numSites;
+     struct XdSite sites[XD_MAX_SITES];
+     struct XdParams params;
+diff --git a/repro_tools/xdlink/xd_tables.c b/repro_tools/xdlink/xd_tables.c
+index 044c4d7..157e79c 100644
+--- a/repro_tools/xdlink/xd_tables.c
++++ b/repro_tools/xdlink/xd_tables.c
+@@ -6,7 +6,7 @@ const u32 gColosseumProgram = 0x089AA144;
+ const struct XdProgram gXdPrograms[] =
+ {
+     {   // 02_TEST_maxbtl_bin.gba
+-        0xF610C900, 0x180A8, 0x3E0, 0x18070, 0x20D80, 0x05ADE281,
++        0xD4E8A178, 0x180A8, 0x3E0, 0x18070, 0x20D80, 0x15209F51,
+         4,
+         {
+             {0x0200ABBE, XD_CALL_IDENTIFY},
+@@ -32,7 +32,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 03_TEST_maxbtl_english_bin.gba
+-        0x6C10ED22, 0x1A248, 0x3E0, 0x1A204, 0x27120, 0xE0B336DC,
++        0x8C4CD5B8, 0x1A248, 0x3E0, 0x1A204, 0x27120, 0x0022332C,
+         4,
+         {
+             {0x0200B28A, XD_CALL_IDENTIFY},
+@@ -58,7 +58,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 04_TEST_maxbtl_france_bin.gba
+-        0x11DD342D, 0x1A248, 0x3E0, 0x1A20C, 0x27118, 0x50361A33,
++        0x4D7E2C01, 0x1A248, 0x3E0, 0x1A20C, 0x27118, 0x75D70E43,
+         4,
+         {
+             {0x0200B26E, XD_CALL_IDENTIFY},
+@@ -84,7 +84,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 05_TEST_maxbtl_germany_bin.gba
+-        0xC99F17DB, 0x1A218, 0x3E0, 0x1A1D8, 0x27164, 0xDC06A179,
++        0x6387F7DB, 0x1A218, 0x3E0, 0x1A1D8, 0x27164, 0xD08A2529,
+         4,
+         {
+             {0x0200B28E, XD_CALL_IDENTIFY},
+@@ -110,7 +110,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 06_TEST_maxbtl_italy_bin.gba
+-        0x02A7EC55, 0x1A248, 0x3E0, 0x1A204, 0x27140, 0xBC644FCF,
++        0xEFC50689, 0x1A248, 0x3E0, 0x1A204, 0x27140, 0xE6B52FFF,
+         4,
+         {
+             {0x0200B28E, XD_CALL_IDENTIFY},
+@@ -136,7 +136,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 07_TEST_maxbtl_spain_bin.gba
+-        0xBB3BD0FB, 0x1A298, 0x3E0, 0x1A258, 0x2719C, 0xFCE3CFED,
++        0x7B0558FB, 0x1A298, 0x3E0, 0x1A258, 0x2719C, 0x2D5C2FFD,
+         4,
+         {
+             {0x0200B29A, XD_CALL_IDENTIFY},
+@@ -162,7 +162,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 08_TEST_maxcng_bin.gba
+-        0xA68A4B35, 0xFCD8, 0x3E0, 0xFC9C, 0x161D4, 0xE1136E4A,
++        0x538B9779, 0xFCD8, 0x3E0, 0xFC9C, 0x161D4, 0x0AC133FA,
+         7,
+         {
+             {0x020041D2, XD_CALL_IDENTIFY},
+@@ -191,7 +191,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 09_TEST_maxcng_english_bin.gba
+-        0x2288E4C1, 0x11AA8, 0x3E0, 0x11A68, 0x1BBAC, 0x293974A7,
++        0x9F8A2C41, 0x11AA8, 0x3E0, 0x11A68, 0x1BBAC, 0xD53320F7,
+         7,
+         {
+             {0x02004316, XD_CALL_IDENTIFY},
+@@ -220,7 +220,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 10_TEST_maxcng_france_bin.gba
+-        0x95DF0C00, 0x11AA8, 0x3E0, 0x11A64, 0x1BB98, 0x3399CD1A,
++        0xEE65C2F2, 0x11AA8, 0x3E0, 0x11A64, 0x1BB98, 0x32FEF02A,
+         7,
+         {
+             {0x020042FE, XD_CALL_IDENTIFY},
+@@ -249,7 +249,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 11_TEST_maxcng_germany_bin.gba
+-        0xEFF13938, 0x11AC8, 0x3E0, 0x11A90, 0x1BC44, 0xEE7DE00D,
++        0x7F78A6F0, 0x11AC8, 0x3E0, 0x11A90, 0x1BC44, 0xB224479D,
+         7,
+         {
+             {0x0200430E, XD_CALL_IDENTIFY},
+@@ -278,7 +278,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 12_TEST_maxcng_italy_bin.gba
+-        0xEC157880, 0x11AB8, 0x3E0, 0x11A80, 0x1BBCC, 0xCDBE2F7B,
++        0xE45ADA18, 0x11AB8, 0x3E0, 0x11A80, 0x1BBCC, 0x0D70AB8B,
+         7,
+         {
+             {0x0200431A, XD_CALL_IDENTIFY},
+@@ -307,7 +307,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 13_TEST_maxcng_spain_bin.gba
+-        0x5B66B11D, 0x11AE8, 0x3E0, 0x11AA4, 0x1BC0C, 0xE4C0ABB8,
++        0x7C516E61, 0x11AE8, 0x3E0, 0x11AA4, 0x1BC0C, 0xE6875888,
+         7,
+         {
+             {0x0200431A, XD_CALL_IDENTIFY},
+-- 
+2.43.0
+

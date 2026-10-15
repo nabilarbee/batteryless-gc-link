@@ -1,0 +1,316 @@
+From 15dd4347a1aa1af662d833517ad3edb429744996 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 21:52:32 +0800
+Subject: [PATCH 13/14] XD hook: hash only the received bytes the program needs
+
+From the compressed data to the end of the loader, so a changed header
+byte or different padding after the loader doesn't stop the fix. The
+decompressed program is still checked as a whole before anything is
+changed. The emulator test covers that case and the 128 KiB block size
+of the AMD board.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JPQshc9oBXnzvR2E67Khm
+---
+ repro_tools/linkhook.bin             | Bin 8420 -> 8368 bytes
+ repro_tools/test/xd_emu_test.py      |  19 +++++++++++++++++--
+ repro_tools/xdlink/analyze_xd.py     |   8 ++++++--
+ repro_tools/xdlink/linkhook.bin      | Bin 8420 -> 8368 bytes
+ repro_tools/xdlink/linkhook.c        |   2 +-
+ repro_tools/xdlink/make_xd_tables.py |   4 ++--
+ repro_tools/xdlink/xd_link.h         |   3 +--
+ repro_tools/xdlink/xd_tables.c       |  24 ++++++++++++------------
+ 8 files changed, 39 insertions(+), 21 deletions(-)
+
+diff --git a/repro_tools/linkhook.bin b/repro_tools/linkhook.bin
+index 04ce19f79780c372920e718d42029b1298441c4a..301beffd4c53f67ecc2c6ebe31da0385f3ea6312 100755
+GIT binary patch
+delta 436
+zcmaFjxWSS0qQV>w4}X8}4HG#H>lxG}JQy<CoSZJP%S=%)lyP(x_27|6%@Fm_l6a8O
+zpxDXcAR(C1=%jyfVMc@UY?c!eK^aX>8W;III3+Tr1Z4hyKmK1aqr*x5BA53|2`&$g
+z1TGIvFfC&IQi9Wi&6zJj<iQ$;IUIW|=WuLcWMH!S_y7MIAkFb%{?k2zK!%Re91aEs
+zp9n^?eNKBXPdul`y920{*`vjY@#6pQGbeL0W@}DSbaYnp;FVxd5J+IqHNViH(7>XZ
+z`Tx7)|IEw|pyL$06}=RFG-YBY&t=qBUy<43By>sK?-7HBjEq5p1Ve_VjDlgO1ZPGk
+zL#HHX#{chA{xh1anEakm(GcdeB_LP4U}jnZwA=hYGZO<4gV-Dl^PdX**MG=;zrdZ*
+zgTdW*vm;ZzI19r`fp3#fNKRl;dMl7KIYDXyi>}FC!O1^>jN9V#Pfng7J%J_k&2py6
+z8Zr}DeqXTOJ^28TVd~wrY;uI`1eSwOI+P}V05TYO?oXZEAvb}=!t&$$$qMolnJYx!
+SOx__sfkk#>TJ+=qg((0tyqY}#
+
+delta 474
+zcmdns_{5R(s=^!&4}X8}Clfgh>)qWNwlJuPdoX0QIXPTvP~Xqe;5I|SP{z?&*n>x6
+zX@;<emV`p)0ZGA(Mkn2i4>B4QJ6Rkg0)afWi;5W*GXK9H|DTxA;Us^N(?e5&(}N=c
+zm1cA1OAvYRz+n!@0n0fYTNoLb)&Mcbhxt$U0BHkJC7=Y5!NA}X!D!~@dhjyGo*8Zv
+zPwDaQ0V-$qXmMh^`2YL#$*hdoj58(|G75`kX8!+f|9@p>hm-zA1#d+!MITL>gvm1*
+zwbfr_wm1o068C$=pdq7R&>+E(p(&$c*eSu8(aF#$$(iy0`;`BTCNCzxW>hqUIcNpY
+zeufv!Oe=u4ng3^IVgO<gn}cEgQ-S~b54rCbxHEb%xCd^wWvUnFXlP<&*zxx5pUDR#
+zCvYe%VPtssjLm*>h!lhquQlI%@(Up6!D2>+nKM4rPp*-M$Sm(*(V8qEGl3%ksHZdP
+zbo}HcK+b}H3=HaD<b5Vv$WGvBkYQxtcKq~i@);;6qm#pKa)KOC8BoR`>gAWoU*smT
+b1KAZ>%r_=?$WP!n0OZ(DD3F*eqc8;kudbtS
+
+diff --git a/repro_tools/test/xd_emu_test.py b/repro_tools/test/xd_emu_test.py
+index 3273072..f5b35c7 100644
+--- a/repro_tools/test/xd_emu_test.py
++++ b/repro_tools/test/xd_emu_test.py
+@@ -54,6 +54,7 @@ lib.HostSramWrite8.argtypes = [ctypes.c_uint32, ctypes.c_uint8]
+ lib.HostBankWrite8.argtypes = [ctypes.c_uint8]
+ lib.SimInit.argtypes = [ctypes.c_int, ctypes.c_uint32]
+ lib.SimRom.restype = ctypes.POINTER(ctypes.c_uint8)
++lib.SimSetEraseBlock.argtypes = [ctypes.c_uint32]
+ 
+ 
+ class SimStats(ctypes.Structure):
+@@ -262,9 +263,19 @@ def shim_symbols():
+     return syms
+ 
+ 
+-def phase1(rom, hook, prog_path, matcher):
++def phase1(rom, hook, prog_path, matcher, tweak=False):
+     name = os.path.basename(prog_path)
+     program = open(prog_path, 'rb').read()
++    if tweak:
++        # As if the GameCube changed a header byte and sent different padding
++        # after the loader: the hook only looks at what the program needs.
++        p = bytearray(program)
++        p[0xBE] ^= 0x5A
++        info0 = analyze_xd.analyze(prog_path, matcher)[0]
++        end = info0['loaderOffset'] + 0x1C4
++        p[end:] = bytes(len(p) - end) + b'\xAA' * 8
++        program = bytes(p)
++        name += ' (header byte and padding changed)'
+     info, _, image = analyze_xd.analyze(prog_path, matcher)
+     syms = shim_symbols()
+     gba = receive(rom, program)
+@@ -340,7 +351,10 @@ def find_bytes(gba, needle):
+ 
+ def phase2(state, info, board, rom):
+     """XD's start-up up to its save read, from the end of phase 1."""
++    board, _, block = board.partition('/')
+     lib.SimInit(BOARDS[board], 7)
++    if block:
++        lib.SimSetEraseBlock(int(block, 16))
+     ctypes.memmove(lib.SimRom(), rom, ROM_SIZE)
+     return boot_from(state, info)
+ 
+@@ -410,6 +424,7 @@ def main(argv):
+     for p in progs:
+         gba, info = phase1(rom, hook, p, m)
+         states[os.path.basename(p)] = (gba, info)
++    phase1(rom, hook, [p for p in progs if 'maxcng' in p][0], m, tweak=True)
+     phase1_others(rom, argv[2], m)
+ 
+     print('phase 2: save on simulated carts (trade program)')
+@@ -418,7 +433,7 @@ def main(argv):
+              'io': gba.read(0x04000000, 0x1000), 'after_read': 0x02000292,
+              'link_save': 0x02000AC4, 'joy_flags': 0x0201F240 + 0x87C}
+     check(info['sites']['savePhase'] == [0x02000AC8, 0x02000B00], 'the test assumes the US trade program')
+-    for board, writable in (('amd_swapped', True), ('amd_dual', True), ('intel_buffered', True),
++    for board, writable in (('amd_swapped', True), ('amd_swapped/20000', True), ('amd_dual', True), ('intel_buffered', True),
+                             ('intel_word', True), ('amd_x16', False)):
+         save_test(state, info, board, rom, writable)
+ 
+diff --git a/repro_tools/xdlink/analyze_xd.py b/repro_tools/xdlink/analyze_xd.py
+index d094899..7651564 100644
+--- a/repro_tools/xdlink/analyze_xd.py
++++ b/repro_tools/xdlink/analyze_xd.py
+@@ -261,13 +261,17 @@ def find_save_link(img):
+ 
+ def analyze(path, matcher):
+     prog = open(path, 'rb').read()
+-    res = {'file': os.path.basename(path), 'recvSize': len(prog) // 4 * 4}
+-    res['recvHash'] = fnv_words(prog[:res['recvSize']])
++    res = {'file': os.path.basename(path)}
+     ld = find_loader(prog)
+     if not ld:
+         raise ValueError('no XD loader found')
+     off, bstart, bend = ld
+     res.update(loaderOffset=off, blobStart=bstart, blobEnd=bend)
++    # The hook hashes what the program needs as received, from the compressed
++    # data to the end of the loader: not the header, not trailing padding.
++    if bstart & 3 or off & 3:
++        raise ValueError('unaligned blob or loader')
++    res['recvHash'] = fnv_words(prog[bstart:off + LOADER_SIZE])
+     img, used = lz77_decode(prog, bstart)
+     if used > bend:
+         raise ValueError('compressed data runs past the blob')
+diff --git a/repro_tools/xdlink/linkhook.bin b/repro_tools/xdlink/linkhook.bin
+index 04ce19f79780c372920e718d42029b1298441c4a..301beffd4c53f67ecc2c6ebe31da0385f3ea6312 100755
+GIT binary patch
+delta 436
+zcmaFjxWSS0qQV>w4}X8}4HG#H>lxG}JQy<CoSZJP%S=%)lyP(x_27|6%@Fm_l6a8O
+zpxDXcAR(C1=%jyfVMc@UY?c!eK^aX>8W;III3+Tr1Z4hyKmK1aqr*x5BA53|2`&$g
+z1TGIvFfC&IQi9Wi&6zJj<iQ$;IUIW|=WuLcWMH!S_y7MIAkFb%{?k2zK!%Re91aEs
+zp9n^?eNKBXPdul`y920{*`vjY@#6pQGbeL0W@}DSbaYnp;FVxd5J+IqHNViH(7>XZ
+z`Tx7)|IEw|pyL$06}=RFG-YBY&t=qBUy<43By>sK?-7HBjEq5p1Ve_VjDlgO1ZPGk
+zL#HHX#{chA{xh1anEakm(GcdeB_LP4U}jnZwA=hYGZO<4gV-Dl^PdX**MG=;zrdZ*
+zgTdW*vm;ZzI19r`fp3#fNKRl;dMl7KIYDXyi>}FC!O1^>jN9V#Pfng7J%J_k&2py6
+z8Zr}DeqXTOJ^28TVd~wrY;uI`1eSwOI+P}V05TYO?oXZEAvb}=!t&$$$qMolnJYx!
+SOx__sfkk#>TJ+=qg((0tyqY}#
+
+delta 474
+zcmdns_{5R(s=^!&4}X8}Clfgh>)qWNwlJuPdoX0QIXPTvP~Xqe;5I|SP{z?&*n>x6
+zX@;<emV`p)0ZGA(Mkn2i4>B4QJ6Rkg0)afWi;5W*GXK9H|DTxA;Us^N(?e5&(}N=c
+zm1cA1OAvYRz+n!@0n0fYTNoLb)&Mcbhxt$U0BHkJC7=Y5!NA}X!D!~@dhjyGo*8Zv
+zPwDaQ0V-$qXmMh^`2YL#$*hdoj58(|G75`kX8!+f|9@p>hm-zA1#d+!MITL>gvm1*
+zwbfr_wm1o068C$=pdq7R&>+E(p(&$c*eSu8(aF#$$(iy0`;`BTCNCzxW>hqUIcNpY
+zeufv!Oe=u4ng3^IVgO<gn}cEgQ-S~b54rCbxHEb%xCd^wWvUnFXlP<&*zxx5pUDR#
+zCvYe%VPtssjLm*>h!lhquQlI%@(Up6!D2>+nKM4rPp*-M$Sm(*(V8qEGl3%ksHZdP
+zbo}HcK+b}H3=HaD<b5Vv$WGvBkYQxtcKq~i@);;6qm#pKa)KOC8BoR`>gAWoU*smT
+b1KAZ>%r_=?$WP!n0OZ(DD3F*eqc8;kudbtS
+
+diff --git a/repro_tools/xdlink/linkhook.c b/repro_tools/xdlink/linkhook.c
+index e097d0d..ebb2a88 100644
+--- a/repro_tools/xdlink/linkhook.c
++++ b/repro_tools/xdlink/linkhook.c
+@@ -61,7 +61,7 @@ static void PrepareXd(void)
+         // The literals are a quick filter; the hash checks the whole program.
+         if (lits[0] != EWRAM + p->blobEnd || lits[1] != EWRAM + p->blobStart)
+             continue;
+-        if (Hash((const void *)EWRAM, p->recvSize) != p->recvHash)
++        if (Hash((const void *)(EWRAM + p->blobStart), p->loaderOffset + XD_LOADER_SIZE - p->blobStart) != p->recvHash)
+             continue;
+         loader[XD_LOADER_JUMP / 4] = 0xE59FF008;   // ldr pc, [pc, #8]
+         loader[XD_LOADER_SPARE / 4] = (u32)XdPostLoadArm;
+diff --git a/repro_tools/xdlink/make_xd_tables.py b/repro_tools/xdlink/make_xd_tables.py
+index e923351..1dcde21 100644
+--- a/repro_tools/xdlink/make_xd_tables.py
++++ b/repro_tools/xdlink/make_xd_tables.py
+@@ -52,8 +52,8 @@ def main(argv):
+            'const struct XdProgram gXdPrograms[] =', '{']
+     for r, sites in entries:
+         out.append('    {   // %s' % r['file'])
+-        out.append('        0x%X, 0x%08X, 0x%X, 0x%X, 0x%X, 0x%X, 0x%08X,' % (
+-            r['recvSize'], r['recvHash'], r['loaderOffset'], r['blobStart'], r['blobEnd'], r['decSize'], r['decHash']))
++        out.append('        0x%08X, 0x%X, 0x%X, 0x%X, 0x%X, 0x%08X,' % (
++            r['recvHash'], r['loaderOffset'], r['blobStart'], r['blobEnd'], r['decSize'], r['decHash']))
+         out.append('        %d,' % len(sites))
+         out.append('        {')
+         for s, c in sites:
+diff --git a/repro_tools/xdlink/xd_link.h b/repro_tools/xdlink/xd_link.h
+index 9ad1cb2..6b7aef1 100644
+--- a/repro_tools/xdlink/xd_link.h
++++ b/repro_tools/xdlink/xd_link.h
+@@ -23,8 +23,7 @@ struct XdSite
+ // One XD link program, as sent by the GameCube and after decompression.
+ struct XdProgram
+ {
+-    u32 recvSize;       // bytes hashed of the program as received
+-    u32 recvHash;
++    u32 recvHash;       // hash of [blobStart, loaderOffset + XD_LOADER_SIZE) as received
+     u32 loaderOffset;
+     u32 blobStart;      // compressed program, offsets in the received image
+     u32 blobEnd;
+diff --git a/repro_tools/xdlink/xd_tables.c b/repro_tools/xdlink/xd_tables.c
+index 3a0c7d8..044c4d7 100644
+--- a/repro_tools/xdlink/xd_tables.c
++++ b/repro_tools/xdlink/xd_tables.c
+@@ -6,7 +6,7 @@ const u32 gColosseumProgram = 0x089AA144;
+ const struct XdProgram gXdPrograms[] =
+ {
+     {   // 02_TEST_maxbtl_bin.gba
+-        0x18280, 0xFCEDEDB8, 0x180A8, 0x3E0, 0x18070, 0x20D80, 0x05ADE281,
++        0xF610C900, 0x180A8, 0x3E0, 0x18070, 0x20D80, 0x05ADE281,
+         4,
+         {
+             {0x0200ABBE, XD_CALL_IDENTIFY},
+@@ -32,7 +32,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 03_TEST_maxbtl_english_bin.gba
+-        0x1A420, 0x3F06E6EE, 0x1A248, 0x3E0, 0x1A204, 0x27120, 0xE0B336DC,
++        0x6C10ED22, 0x1A248, 0x3E0, 0x1A204, 0x27120, 0xE0B336DC,
+         4,
+         {
+             {0x0200B28A, XD_CALL_IDENTIFY},
+@@ -58,7 +58,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 04_TEST_maxbtl_france_bin.gba
+-        0x1A420, 0x379F2A5F, 0x1A248, 0x3E0, 0x1A20C, 0x27118, 0x50361A33,
++        0x11DD342D, 0x1A248, 0x3E0, 0x1A20C, 0x27118, 0x50361A33,
+         4,
+         {
+             {0x0200B26E, XD_CALL_IDENTIFY},
+@@ -84,7 +84,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 05_TEST_maxbtl_germany_bin.gba
+-        0x1A3E0, 0x7FF09899, 0x1A218, 0x3E0, 0x1A1D8, 0x27164, 0xDC06A179,
++        0xC99F17DB, 0x1A218, 0x3E0, 0x1A1D8, 0x27164, 0xDC06A179,
+         4,
+         {
+             {0x0200B28E, XD_CALL_IDENTIFY},
+@@ -110,7 +110,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 06_TEST_maxbtl_italy_bin.gba
+-        0x1A420, 0x2A0488A7, 0x1A248, 0x3E0, 0x1A204, 0x27140, 0xBC644FCF,
++        0x02A7EC55, 0x1A248, 0x3E0, 0x1A204, 0x27140, 0xBC644FCF,
+         4,
+         {
+             {0x0200B28E, XD_CALL_IDENTIFY},
+@@ -136,7 +136,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 07_TEST_maxbtl_spain_bin.gba
+-        0x1A460, 0x5FCB5A89, 0x1A298, 0x3E0, 0x1A258, 0x2719C, 0xFCE3CFED,
++        0xBB3BD0FB, 0x1A298, 0x3E0, 0x1A258, 0x2719C, 0xFCE3CFED,
+         4,
+         {
+             {0x0200B29A, XD_CALL_IDENTIFY},
+@@ -162,7 +162,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 08_TEST_maxcng_bin.gba
+-        0xFEA0, 0x4C1FF427, 0xFCD8, 0x3E0, 0xFC9C, 0x161D4, 0xE1136E4A,
++        0xA68A4B35, 0xFCD8, 0x3E0, 0xFC9C, 0x161D4, 0xE1136E4A,
+         7,
+         {
+             {0x020041D2, XD_CALL_IDENTIFY},
+@@ -191,7 +191,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 09_TEST_maxcng_english_bin.gba
+-        0x11C80, 0xEEF2410B, 0x11AA8, 0x3E0, 0x11A68, 0x1BBAC, 0x293974A7,
++        0x2288E4C1, 0x11AA8, 0x3E0, 0x11A68, 0x1BBAC, 0x293974A7,
+         7,
+         {
+             {0x02004316, XD_CALL_IDENTIFY},
+@@ -220,7 +220,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 10_TEST_maxcng_france_bin.gba
+-        0x11C80, 0x3E088968, 0x11AA8, 0x3E0, 0x11A64, 0x1BB98, 0x3399CD1A,
++        0x95DF0C00, 0x11AA8, 0x3E0, 0x11A64, 0x1BB98, 0x3399CD1A,
+         7,
+         {
+             {0x020042FE, XD_CALL_IDENTIFY},
+@@ -249,7 +249,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 11_TEST_maxcng_germany_bin.gba
+-        0x11CA0, 0xF4E95A30, 0x11AC8, 0x3E0, 0x11A90, 0x1BC44, 0xEE7DE00D,
++        0xEFF13938, 0x11AC8, 0x3E0, 0x11A90, 0x1BC44, 0xEE7DE00D,
+         7,
+         {
+             {0x0200430E, XD_CALL_IDENTIFY},
+@@ -278,7 +278,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 12_TEST_maxcng_italy_bin.gba
+-        0x11C80, 0xD8036A78, 0x11AB8, 0x3E0, 0x11A80, 0x1BBCC, 0xCDBE2F7B,
++        0xEC157880, 0x11AB8, 0x3E0, 0x11A80, 0x1BBCC, 0xCDBE2F7B,
+         7,
+         {
+             {0x0200431A, XD_CALL_IDENTIFY},
+@@ -307,7 +307,7 @@ const struct XdProgram gXdPrograms[] =
+         },
+     },
+     {   // 13_TEST_maxcng_spain_bin.gba
+-        0x11CC0, 0x1870903F, 0x11AE8, 0x3E0, 0x11AA4, 0x1BC0C, 0xE4C0ABB8,
++        0x5B66B11D, 0x11AE8, 0x3E0, 0x11AA4, 0x1BC0C, 0xE4C0ABB8,
+         7,
+         {
+             {0x0200431A, XD_CALL_IDENTIFY},
+-- 
+2.43.0
+

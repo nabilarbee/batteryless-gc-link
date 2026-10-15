@@ -1,0 +1,2201 @@
+From ac22b8698126eb50693fc52d8edfe6680a5bcf04 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 21:23:16 +0800
+Subject: [PATCH 11/14] Add the XD link fix: Emerald hook, XD shim and emulator
+ test
+
+XD sends its own GBA programs (trade and battle), which Emerald runs as
+sent. A hook in Emerald's copyright-screen code (in place of its Colosseum
+check, which it still does) recognises XD's programs by hash, makes their
+loader jump to XdPostLoad after decompression, and that copies a shim to
+the top of EWRAM and redirects IdentifyFlash, ReadFlash, VerifyFlashSector
+(NBytes) and the link save step to it. The shim serves the save with the
+Colosseum repro backend, unchanged.
+
+analyze_xd.py finds everything per program (flash library by signature,
+call sites, variables, memory use, that every write goes through the save
+step); make_xd_tables.py turns that into addresses and hashes only.
+xd_emu_test.py runs Emerald's patched code, XD's real loader and save code
+against the simulated carts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JPQshc9oBXnzvR2E67Khm
+---
+ .gitignore                              |   1 +
+ repro_tools/linkhook.bin                | Bin 0 -> 8424 bytes
+ repro_tools/test/xd_emu_test.py         | 451 ++++++++++++++++++++++++
+ repro_tools/xdlink/Makefile             |  72 ++++
+ repro_tools/xdlink/analyze_xd.py        | 389 ++++++++++++++++++++
+ repro_tools/xdlink/emerald_hook.py      |  78 ++++
+ repro_tools/xdlink/gba/flash_internal.h |  39 ++
+ repro_tools/xdlink/linkhook.bin         | Bin 0 -> 8424 bytes
+ repro_tools/xdlink/linkhook.c           | 131 +++++++
+ repro_tools/xdlink/linkhook_asm.s       |  45 +++
+ repro_tools/xdlink/make_xd_tables.py    |  75 ++++
+ repro_tools/xdlink/rom.ld               |  24 ++
+ repro_tools/xdlink/shim.ld              |  31 ++
+ repro_tools/xdlink/xd_link.h            |  41 +++
+ repro_tools/xdlink/xd_params.h          |  42 +++
+ repro_tools/xdlink/xd_shim.c            |  65 ++++
+ repro_tools/xdlink/xd_tables.c          | 340 ++++++++++++++++++
+ 17 files changed, 1824 insertions(+)
+ create mode 100755 repro_tools/linkhook.bin
+ create mode 100644 repro_tools/test/xd_emu_test.py
+ create mode 100644 repro_tools/xdlink/Makefile
+ create mode 100644 repro_tools/xdlink/analyze_xd.py
+ create mode 100644 repro_tools/xdlink/emerald_hook.py
+ create mode 100644 repro_tools/xdlink/gba/flash_internal.h
+ create mode 100755 repro_tools/xdlink/linkhook.bin
+ create mode 100644 repro_tools/xdlink/linkhook.c
+ create mode 100644 repro_tools/xdlink/linkhook_asm.s
+ create mode 100644 repro_tools/xdlink/make_xd_tables.py
+ create mode 100644 repro_tools/xdlink/rom.ld
+ create mode 100644 repro_tools/xdlink/shim.ld
+ create mode 100644 repro_tools/xdlink/xd_link.h
+ create mode 100644 repro_tools/xdlink/xd_params.h
+ create mode 100644 repro_tools/xdlink/xd_shim.c
+ create mode 100644 repro_tools/xdlink/xd_tables.c
+
+diff --git a/.gitignore b/.gitignore
+index dd33ff9..2ea17df 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,3 +9,4 @@ tools/binutils
+ *.lz
+ *.dump
+ .idea
++repro_tools/xdlink/build/
+diff --git a/repro_tools/linkhook.bin b/repro_tools/linkhook.bin
+new file mode 100755
+index 0000000000000000000000000000000000000000..1b81fe18d541c884e2a237008eac3df90bb3cd51
+GIT binary patch
+literal 8424
+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
+T2rvpf3mgEB0Z#)V=;Z$a=7d@M
+
+literal 0
+HcmV?d00001
+
+diff --git a/repro_tools/test/xd_emu_test.py b/repro_tools/test/xd_emu_test.py
+new file mode 100644
+index 0000000..f83d870
+--- /dev/null
++++ b/repro_tools/test/xd_emu_test.py
+@@ -0,0 +1,451 @@
++#!/usr/bin/env python3
++"""End-to-end emulator test of the XD link fix on an Emerald dump.
++
++Phase 1, the hook: the patched copyright-screen code of Emerald runs as if a
++program had just arrived from the GameCube. LinkHook prepares XD's program,
++Emerald starts it, XD's stub and loader decompress it and XdPostLoad installs
++the shim. Stops where XD's decompressed program starts. Also covers
++Colosseum's swap, programs that must be left alone, and a program that
++changes after LinkHook checked it.
++
++Phase 2, the save: from that state, XD's own start-up code runs up to its save
++read, against simulated repro carts holding the dump's save; then the trade
++program's link save step runs with the GameCube handshake emulated. The save
++in cart ROM is checked afterwards and read again after a power cycle.
++
++usage: xd_emu_test.py EMERALD_DUMP XD_PROGRAM_DIR
++  XD_PROGRAM_DIR: the folder written by patch_colosseum_iso.py extract
++"""
++import ctypes
++import glob
++import os
++import struct
++import sys
++
++from unicorn import Uc, UC_ARCH_ARM, UC_MODE_ARM, UC_HOOK_INTR, UC_HOOK_MEM_WRITE, UcError
++from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_SP,
++                               UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_CPSR)
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++TOOLS = os.path.normpath(os.path.join(HERE, '..'))
++sys.path.insert(0, TOOLS)
++sys.path.insert(0, os.path.join(TOOLS, 'xdlink'))
++import bps                                      # noqa: E402
++import analyze_xd                               # noqa: E402
++import emerald_hook                             # noqa: E402
++from emerald_rom import PROGRAM_SIZE, find_program   # noqa: E402
++
++ROM_SIZE = 0x2000000
++SAVE = 0xFC0000
++SECTOR = 0x1000
++SIG = 0x08012025
++GCMB_STRUCT = 0x030062B0      # Emerald's gMultibootProgramStruct
++INTRO_CASE = 0x0816CE44       # SetUpCopyrightScreen, case 141, after the fade
++SHIM = 0x0203E800
++STOP = 0x03007F00
++
++lib = ctypes.CDLL(os.path.join(HERE, 'libsimcart.so'))
++lib.HostRomRead16.restype = ctypes.c_uint16
++lib.HostRomRead16.argtypes = [ctypes.c_uint32]
++lib.HostRomWrite16.argtypes = [ctypes.c_uint32, ctypes.c_uint16]
++lib.HostSramRead8.restype = ctypes.c_uint8
++lib.HostSramRead8.argtypes = [ctypes.c_uint32]
++lib.HostSramWrite8.argtypes = [ctypes.c_uint32, ctypes.c_uint8]
++lib.HostBankWrite8.argtypes = [ctypes.c_uint8]
++lib.SimInit.argtypes = [ctypes.c_int, ctypes.c_uint32]
++lib.SimRom.restype = ctypes.POINTER(ctypes.c_uint8)
++
++
++class SimStats(ctypes.Structure):
++    _fields_ = [('erases', ctypes.c_uint), ('programs', ctypes.c_uint), ('violations', ctypes.c_uint),
++                ('strayWrites', ctypes.c_uint), ('badBankWrites', ctypes.c_uint)]
++
++
++lib.SimStats.restype = ctypes.POINTER(SimStats)
++lib.SimLastViolation.restype = ctypes.c_char_p
++BOARDS = {'amd_swapped': 3, 'amd_dual': 4, 'intel_buffered': 1, 'intel_word': 2, 'amd_x16': 5}
++
++failures = 0
++
++
++def check(cond, msg):
++    global failures
++    if not cond:
++        failures += 1
++        print('    FAIL:', msg)
++
++
++def sim_rom():
++    return ctypes.cast(lib.SimRom(), ctypes.POINTER(ctypes.c_uint8 * ROM_SIZE)).contents
++
++
++def build_rom(dump):
++    rom = bytearray(dump)
++    pos = find_program(rom)
++    new = bps.apply(bytes(rom[pos:pos + PROGRAM_SIZE]), open(os.path.join(TOOLS, 'colosseum-mb-repro.bps'), 'rb').read())
++    rom[pos:pos + len(new)] = new
++    hook = open(os.path.join(TOOLS, 'linkhook.bin'), 'rb').read()
++    return bytes(emerald_hook.apply(rom, hook)), hook
++
++
++def slots(rom):
++    out = []
++    for slot in range(2):
++        ids, counters = set(), set()
++        for i in range(14):
++            off = SAVE + (slot * 14 + i) * SECTOR
++            cid, _, sig, counter = struct.unpack_from('<HHII', bytes(rom[off + 0xFF4:off + 0x1000]))
++            if sig == SIG:
++                ids.add(cid)
++                counters.add(counter)
++        out.append(counters.pop() if ids == set(range(14)) and len(counters) == 1 else None)
++    return out
++
++
++def newest_sector(rom, chunk):
++    s = slots(rom)
++    slot = 0 if (s[0] or -1) > (s[1] or -1) else 1
++    for i in range(14):
++        off = SAVE + (slot * 14 + i) * SECTOR
++        if struct.unpack_from('<H', bytes(rom[off + 0xFF4:off + 0xFF6]))[0] == chunk:
++            return bytes(rom[off:off + SECTOR])
++    raise ValueError('chunk %d not found' % chunk)
++
++
++class Gba:
++    """GBA memory map in Unicorn. The cart is either plain memory (phase 1, code
++    runs from ROM) or the simulated flash cart (phase 2, ROM through callbacks)."""
++
++    def __init__(self, rom=None):
++        uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
++        uc.mem_map(0x00000000, 0x4000)
++        uc.mem_map(0x02000000, 0x40000)
++        uc.mem_map(0x03000000, 0x8000)
++        uc.mem_map(0x04000000, 0x1000)
++        uc.mem_map(0x05000000, 0x400)
++        uc.mem_map(0x06000000, 0x18000)
++        uc.mem_map(0x07000000, 0x400)
++        if rom is not None:
++            uc.mem_map(0x08000000, ROM_SIZE)
++            uc.mem_write(0x08000000, rom)
++            uc.mem_map(0x0E000000, 0x10000)
++        else:
++            uc.mmio_map(0x08000000, ROM_SIZE, self.rom_read, None, self.rom_write, None)
++            uc.mmio_map(0x0E000000, 0x10000, self.sram_read, None, self.sram_write, None)
++        uc.mem_write(0x04000130, struct.pack('<H', 0x3FF))   # no keys held
++        uc.mem_write(STOP, struct.pack('<H', 0xE7FE))
++        uc.hook_add(UC_HOOK_INTR, self.swi)
++        uc.hook_add(UC_HOOK_MEM_WRITE, self.dma_write, begin=0x040000DC, end=0x040000DF)
++        uc.hook_add(UC_HOOK_MEM_WRITE, self.joy_write, begin=0x04000154, end=0x04000157)
++        self.uc = uc
++        self.joy_flags = None
++        self.gc_acks = 0
++
++    def rom_read(self, uc, offset, size, data):
++        if size == 1:
++            return (lib.HostRomRead16(offset & ~1) >> ((offset & 1) * 8)) & 0xFF
++        if size == 2:
++            return lib.HostRomRead16(offset)
++        return lib.HostRomRead16(offset) | (lib.HostRomRead16(offset + 2) << 16)
++
++    def rom_write(self, uc, offset, size, value, data):
++        if offset == 0x01000000 and size == 1:
++            lib.HostBankWrite8(value)
++        elif size == 2:
++            lib.HostRomWrite16(offset, value)
++        else:
++            raise RuntimeError('unexpected %d-byte cart write at 0x%X' % (size, offset))
++
++    def sram_read(self, uc, offset, size, data):
++        if size != 1:
++            raise RuntimeError('SRAM is 8-bit only (read size %d at 0x%X)' % (size, offset))
++        return lib.HostSramRead8(offset)
++
++    def sram_write(self, uc, offset, size, value, data):
++        if size != 1:
++            raise RuntimeError('SRAM is 8-bit only (write size %d at 0x%X)' % (size, offset))
++        lib.HostSramWrite8(offset, value)
++
++    def dma_write(self, uc, access, address, size, value, data):
++        """DMA3 with immediate start, as XD's stub uses it to copy its loader."""
++        if address == 0x040000DC and size == 4:
++            cnt = value
++        elif address == 0x040000DE and size == 2:
++            cnt = (value << 16) | struct.unpack('<H', uc.mem_read(0x040000DC, 2))[0]
++        else:
++            return
++        if not cnt & 0x80000000:
++            return
++        if (cnt >> 28) & 3:
++            raise RuntimeError('only immediate DMA is emulated')
++        src, dst = struct.unpack('<II', uc.mem_read(0x040000D4, 8))
++        n = cnt & 0xFFFF or 0x10000
++        width = 4 if cnt & (1 << 26) else 2
++        uc.mem_write(dst, bytes(uc.mem_read(src, n * width)))
++
++    def joy_write(self, uc, access, address, size, value, data):
++        """GameCube side of the save handshake: after phase 0 (JOY_TRANS = 0),
++        say go ahead (flag bit 2) with no command pending (bit 3)."""
++        if self.joy_flags is None:
++            return
++        b = uc.mem_read(self.joy_flags, 1)[0]
++        if value == 0 and not (b & 4) and self.gc_acks == 0:
++            self.gc_acks += 1
++            uc.mem_write(self.joy_flags, bytes([(b | 4) & ~8]))
++
++    def swi(self, uc, intno, data):
++        pc = uc.reg_read(UC_ARM_REG_PC)
++        thumb = uc.reg_read(UC_ARM_REG_CPSR) & 0x20
++        insn = pc - (2 if thumb else 4)
++        num = uc.mem_read(insn, 1)[0] if thumb else uc.mem_read(insn + 2, 1)[0]
++        r0, r1, r2 = (uc.reg_read(r) for r in (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2))
++        if num in (0x01, 0x02, 0x04, 0x05):     # RegisterRamReset, Halt, IntrWait, VBlankIntrWait
++            return
++        if num == 0x06:
++            q = int(r0 if r0 < 0x80000000 else r0 - (1 << 32)) // int(r1 if r1 < 0x80000000 else r1 - (1 << 32))
++            uc.reg_write(UC_ARM_REG_R0, q & 0xFFFFFFFF)
++            return
++        if num in (0x0B, 0x0C):
++            count = r2 & 0x1FFFFF
++            word = 4 if (num == 0x0C or r2 & (1 << 26)) else 2
++            if r2 & (1 << 24):
++                uc.mem_write(r1, bytes(uc.mem_read(r0, word)) * count)
++            else:
++                uc.mem_write(r1, bytes(uc.mem_read(r0, count * word)))
++            return
++        raise RuntimeError('unhandled SWI 0x%X at 0x%X' % (num, insn))
++
++    def run(self, start, until, sp=0x03007E00, lr=None, args=(), limit=100_000_000):
++        uc = self.uc
++        for reg, val in zip((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2), args):
++            uc.reg_write(reg, val)
++        uc.reg_write(UC_ARM_REG_SP, sp)
++        uc.reg_write(UC_ARM_REG_LR, lr if lr is not None else STOP | 1)
++        uc.emu_start(start, until, count=limit)
++        pc = uc.reg_read(UC_ARM_REG_PC)
++        if pc != until:
++            raise RuntimeError('stopped at 0x%08X, not 0x%08X' % (pc, until))
++        return uc.reg_read(UC_ARM_REG_R0)
++
++    def read(self, addr, n):
++        return bytes(self.uc.mem_read(addr, n))
++
++    def u32(self, addr):
++        return struct.unpack('<I', self.read(addr, 4))[0]
++
++
++def receive(rom, program):
++    """Phase 1: Emerald has just received 'program'. Runs Emerald's own code from
++    the copyright screen until the program would start."""
++    gba = Gba(rom)
++    gba.uc.mem_write(0x02000000, program)
++    gba.uc.mem_write(GCMB_STRUCT, bytes(0x2C))
++    gba.uc.mem_write(GCMB_STRUCT + 2, b'\x02')       # image ready to boot
++    return gba
++
++
++def bl_target(word_bytes, site):
++    h1, h2 = struct.unpack('<HH', word_bytes)
++    if (h1 & 0xF800) != 0xF000 or (h2 & 0xF800) != 0xF800:
++        return None
++    off = ((h1 & 0x7FF) << 12) | ((h2 & 0x7FF) << 1)
++    if off & 0x400000:
++        off -= 0x800000
++    return site + 4 + off
++
++
++def shim_symbols():
++    syms = {}
++    for line in open(os.path.join(TOOLS, 'xdlink', 'build', 'shim_syms.h')):
++        p = line.split()
++        syms[p[1][5:]] = int(p[2], 16)
++    return syms
++
++
++def phase1(rom, hook, prog_path, matcher):
++    name = os.path.basename(prog_path)
++    program = open(prog_path, 'rb').read()
++    info, _, image = analyze_xd.analyze(prog_path, matcher)
++    syms = shim_symbols()
++    gba = receive(rom, program)
++    gba.run(INTRO_CASE | 1, 0x02000000)
++    ewram = gba.read(0x02000000, 0x40000)
++    shim = open(os.path.join(TOOLS, 'xdlink', 'build', 'shim.bin'), 'rb').read()
++    check(ewram[SHIM - 0x02000000:SHIM - 0x02000000 + len(shim)] == shim, '%s: shim not installed' % name)
++    calls = {'identify': 'Xd_IdentifyFlash', 'read': 'Xd_ReadFlash', 'verify': 'Xd_VerifyFlashSector',
++             'verifyN': 'Xd_VerifyFlashSectorNBytes', 'savePhase': 'Xd_SavePhase'}
++    expect = bytearray(image)
++    for kind, sites in info['sites'].items():
++        for s in sites:
++            got = bl_target(ewram[s - 0x02000000:s - 0x02000000 + 4], s)
++            check(got == syms[calls[kind]], '%s: %s call at %08X goes to %s' % (name, kind, s, got and hex(got)))
++            expect[s - 0x02000000:s - 0x02000000 + 4] = ewram[s - 0x02000000:s - 0x02000000 + 4]
++    check(ewram[:len(expect)] == bytes(expect), '%s: program differs from XD\'s beyond the redirected calls' % name)
++    params = struct.unpack_from('<14I', ewram, syms['gXdParams'] - 0x02000000)
++    want = [info['functions'][k] for k in ('identifyFlash', 'readFlash', 'verifyFlashSector', 'verifyFlashSectorNBytes',
++                                           'savePhase', 'soundVSyncOff', 'soundVSyncOn')]
++    want += [info['variables'][k] for k in ('programFlashByte', 'programFlashSector', 'eraseFlashChip', 'eraseFlashSector',
++                                            'waitForFlashWrite', 'flashMaxTime', 'flash')]
++    check(list(params) == want, '%s: shim parameters wrong' % name)
++    check(gba.u32(0x0203FFF0) != 0x4B4E4C58, '%s: marker left behind' % name)
++    print('  %s: hook and loader ok (%d calls redirected)' % (name, sum(len(v) for v in info['sites'].values())))
++    return gba, info
++
++
++def phase1_others(rom, xd_dir, matcher):
++    hook_marker = 0x4B4E4C58
++    # Colosseum: the swap Emerald always did.
++    fake = bytearray(open(glob.glob(os.path.join(xd_dir, '*maxcng_english*'))[0], 'rb').read())
++    fake[0xAC:0xB0] = b'Gc6e'
++    gba = receive(rom, bytes(fake))
++    gba.run(INTRO_CASE | 1, 0x020000C0)
++    pos = emerald_hook.PROGRAM_AT
++    want = bytearray(rom[pos:pos + PROGRAM_SIZE])
++    want[0xAC:0xB0] = b'Gc6e'
++    check(gba.read(0x02000000, PROGRAM_SIZE) == bytes(want), 'Colosseum: program not swapped in as before')
++    print('  Colosseum program: swapped in as before')
++
++    # Unknown programs run as sent: coupon.bin, and an XD program with one byte changed.
++    for label, data in (('coupon.bin', open(glob.glob(os.path.join(xd_dir, '*coupon*'))[0], 'rb').read()),
++                        ('changed XD program', None)):
++        if data is None:
++            p = bytearray(open(glob.glob(os.path.join(xd_dir, '*maxcng_english*'))[0], 'rb').read())
++            p[0x5000] ^= 1
++            data = bytes(p)
++        gba = receive(rom, data)
++        gba.run(INTRO_CASE | 1, 0x020000C0)
++        check(gba.read(0x02000000, len(data)) == data, '%s: changed before running' % label)
++        check(gba.u32(0x0203FFF0) != hook_marker, '%s: marked' % label)
++        print('  %s: left alone' % label)
++
++    # A program that matches when received but not after decompression (here,
++    # changed between the check and the start) runs as it is, without the shim.
++    path = glob.glob(os.path.join(xd_dir, '*maxcng_english*'))[0]
++    data = open(path, 'rb').read()
++    gba = receive(rom, data)
++    info = analyze_xd.analyze(path, matcher)[0]
++    # run up to the stub's entry, then damage the compressed data
++    gba.run(INTRO_CASE | 1, 0x020000C0)
++    gba.uc.mem_write(0x02000000 + info['blobStart'] + 0x100, b'\x00')
++    gba.run(0x020000C0, 0x02000000)
++    check(gba.read(SHIM, 16) != open(os.path.join(TOOLS, 'xdlink', 'build', 'shim.bin'), 'rb').read(16),
++          'shim installed for a program that changed')
++    check(gba.u32(0x0203FFF0) != hook_marker, 'marker left behind after a mismatch')
++    print('  program changed after the check: started without the shim')
++
++
++def find_bytes(gba, needle):
++    ew = gba.read(0x02000000, 0x40000)
++    i = ew.find(needle)
++    return None if i < 0 else 0x02000000 + i
++
++
++def phase2(state, info, board, rom):
++    """XD's start-up up to its save read, from the end of phase 1."""
++    lib.SimInit(BOARDS[board], 7)
++    ctypes.memmove(lib.SimRom(), rom, ROM_SIZE)
++    return boot_from(state, info)
++
++
++def boot_from(state, info):
++    gba = Gba(None)
++    gba.uc.mem_write(0x02000000, state['ewram'])
++    gba.uc.mem_write(0x03000000, state['iwram'])
++    gba.uc.mem_write(0x04000000, state['io'])
++    gba.uc.mem_write(0x04000130, struct.pack('<H', 0x3FF))
++    gba.uc.mem_write(STOP, struct.pack('<H', 0xE7FE))
++    # main() up to the instruction after its save read (maxcng: 0x02000290 strb r0,[r4])
++    gba.run(0x02000000, state['after_read'], limit=200_000_000)
++    return gba
++
++
++def save_test(state, info, board, rom, writable):
++    print('  board %s:' % board)
++    syms = shim_symbols()
++    gba = phase2(state, info, board, rom)
++    before = bytes(sim_rom())
++    sb2 = newest_sector(before, 0)[:0x20]
++    at = find_bytes(gba, sb2)
++    check(at is not None, 'save not read into memory')
++    check(bytes(sim_rom()) == before, 'reading changed the cart')
++    if at is None:
++        return
++    # Change the trainer name and run the trade program's link save step.
++    gba.uc.mem_write(at, b'\xCE\xBF\xCD\xCE\xFF')        # "TEST"
++    gba.joy_flags = state['joy_flags']
++    # On a board whose writes are refused, XD retries every byte of each
++    # sector before it gives up, which takes a while.
++    failed = gba.run(state['link_save'] | 1, STOP, lr=STOP | 1, limit=100_000_000 if writable else 600_000_000)
++    stats = lib.SimStats().contents
++    after = bytes(sim_rom())
++    print('    link save -> %d, erases %d, program ops %d, slots %s -> %s' % (
++        failed, stats.erases, stats.programs, slots(before), slots(after)))
++    check(stats.violations == 0, 'chip violations: %s' % lib.SimLastViolation())
++    check(stats.badBankWrites == 0, 'bad bank register writes')
++    check(after[:SAVE] == before[:SAVE] and after[SAVE + 0x20000:] == before[SAVE + 0x20000:],
++          'cart changed outside the save area')
++    if not writable:
++        check(failed == 1 and after == before, 'save on an unsupported board was not refused cleanly')
++        return
++    old = slots(before)
++    newest = max(c for c in old if c is not None)
++    check(failed == 0 and gba.gc_acks == 1, 'link save failed')
++    check(sorted(c for c in slots(after) if c is not None) == [newest, newest + 1], 'slots after save: %s' % slots(after))
++    check(newest_sector(after, 0)[:5] == b'\xCE\xBF\xCD\xCE\xFF', 'new trainer name not in the newest slot')
++
++    # Power cycle, start XD's program again, read the save back.
++    lib.SimPowerCycle()
++    gba2 = boot_from(state, info)
++    check(find_bytes(gba2, b'\xCE\xBF\xCD\xCE\xFF' + sb2[5:0x20]) is not None, 'changed save not read back after power cycle')
++
++
++def main(argv):
++    if len(argv) != 3:
++        print(__doc__)
++        return 2
++    dump = open(argv[1], 'rb').read()
++    rom, hook = build_rom(dump)
++    m = analyze_xd.Matcher()
++    print('phase 1: Emerald receives programs')
++    progs = sorted(glob.glob(os.path.join(argv[2], '*max*english*.gba')))
++    states = {}
++    for p in progs:
++        gba, info = phase1(rom, hook, p, m)
++        states[os.path.basename(p)] = (gba, info)
++    phase1_others(rom, argv[2], m)
++
++    print('phase 2: save on simulated carts (trade program)')
++    gba, info = [v for k, v in states.items() if 'maxcng' in k][0]
++    state = {'ewram': gba.read(0x02000000, 0x40000), 'iwram': gba.read(0x03000000, 0x8000),
++             'io': gba.read(0x04000000, 0x1000), 'after_read': 0x02000292,
++             'link_save': 0x02000AC4, 'joy_flags': 0x0201F240 + 0x87C}
++    check(info['sites']['savePhase'] == [0x02000AC8, 0x02000B00], 'the test assumes the US trade program')
++    for board, writable in (('amd_swapped', True), ('amd_dual', True), ('intel_buffered', True),
++                            ('intel_word', True), ('amd_x16', False)):
++        save_test(state, info, board, rom, writable)
++
++    print('phase 2: battle program reads the save')
++    gba, info = [v for k, v in states.items() if 'maxbtl' in k][0]
++    lib.SimInit(BOARDS['amd_swapped'], 3)
++    ctypes.memmove(lib.SimRom(), rom, ROM_SIZE)
++    before = bytes(sim_rom())
++    g = Gba(None)
++    g.uc.mem_write(0x02000000, gba.read(0x02000000, 0x40000))
++    g.uc.mem_write(0x03000000, gba.read(0x03000000, 0x8000))
++    g.uc.mem_write(0x04000000, gba.read(0x04000000, 0x1000))
++    g.uc.mem_write(0x04000130, struct.pack('<H', 0x3FF))
++    g.uc.reg_write(UC_ARM_REG_SP, 0x03007E00)
++    g.uc.emu_start(0x02000000, 0xFFFFFFF0, count=80_000_000)   # start-up; then it waits for the GameCube
++    syms = shim_symbols()
++    check(g.read(syms['gReproActive'], 1) == b'\x01', 'battle program: repro mode not active')
++    check(g.u32(syms['gReproSaveOffset']) == SAVE, 'battle program: save offset %X' % g.u32(syms['gReproSaveOffset']))
++    check(find_bytes(g, newest_sector(before, 0)[:0x20]) is not None, 'battle program: save not read')
++    check(bytes(sim_rom()) == before and lib.SimStats().contents.erases == 0, 'battle program changed the cart')
++    print('  battle program: save read from cart ROM, nothing written')
++
++    print('%d FAILURES' % failures if failures else 'all XD emulator tests passed')
++    return 1 if failures else 0
++
++
++if __name__ == '__main__':
++    sys.exit(main(sys.argv))
+diff --git a/repro_tools/xdlink/Makefile b/repro_tools/xdlink/Makefile
+new file mode 100644
+index 0000000..5bd136b
+--- /dev/null
++++ b/repro_tools/xdlink/Makefile
+@@ -0,0 +1,72 @@
++# Builds linkhook.bin: Emerald's link hook and the XD shim, for free cart ROM.
++#   build/shim.bin   the shim, linked to run at 0x0203E800 (EWRAM)
++#   linkhook.bin     the hook, linked at ROM_ADDR, with the shim inside
++# xd_tables.c is generated by make_xd_tables.py from XD's link programs.
++# Needs agbcc in ../../tools/agbcc and binutils for arm-none-eabi.
++
++AGBCC   := ../../tools/agbcc
++CC1     := $(AGBCC)/bin/old_agbcc
++PREFIX  := arm-none-eabi-
++CPP     := $(PREFIX)cpp
++AS      := $(PREFIX)as
++LD      := $(PREFIX)ld
++OBJCOPY := $(PREFIX)objcopy
++NM      := $(PREFIX)nm
++
++ROM_ADDR := 0x089C2000
++
++# "." first so that gba/flash_internal.h here replaces the payload's.
++CPPFLAGS := -I $(AGBCC)/include -iquote . -iquote ../../payload/include -nostdinc -undef
++CFLAGS   := -O2 -mthumb-interwork -fhex-asm -Wimplicit -Werror
++ASFLAGS  := -mcpu=arm7tdmi
++LIBS     := -L $(AGBCC)/lib -lgcc -lc
++REPRO    := ../../payload/src/repro
++
++BUILD := build
++SHIM_OBJS := $(BUILD)/xd_shim.o $(BUILD)/repro_flash.o $(BUILD)/repro_image.o $(BUILD)/repro_cart.o $(BUILD)/repro_scan.o
++HOOK_OBJS := $(BUILD)/linkhook.o $(BUILD)/linkhook_asm.o $(BUILD)/xd_tables.o
++
++all: linkhook.bin
++
++linkhook.bin: $(BUILD)/linkhook.elf
++	$(OBJCOPY) -O binary $< $@
++	cp $@ ../linkhook.bin
++
++$(BUILD)/linkhook.elf: $(HOOK_OBJS) rom.ld
++	$(LD) -T rom.ld --defsym ROM_ADDR=$(ROM_ADDR) -Map $(BUILD)/linkhook.map -o $@ $(HOOK_OBJS) $(LIBS)
++
++$(BUILD)/shim.elf: $(SHIM_OBJS) shim.ld
++	$(LD) -T shim.ld -Map $(BUILD)/shim.map -o $@ $(SHIM_OBJS) $(LIBS)
++
++$(BUILD)/shim.bin: $(BUILD)/shim.elf
++	$(OBJCOPY) -O binary -j .text $< $@
++
++# Addresses in the shim that the hook needs, as #defines.
++$(BUILD)/shim_syms.h: $(BUILD)/shim.elf
++	$(NM) $< | awk '$$3 ~ /^(Xd_|__shim_|gXdParams$$|gRepro)/ { printf "#define SHIM_%s 0x%s\n", $$3, $$1 }' > $@
++
++$(BUILD)/linkhook.o: linkhook.c $(BUILD)/shim_syms.h xd_link.h xd_params.h
++	$(CPP) $(CPPFLAGS) -iquote $(BUILD) $< -o $(BUILD)/linkhook.i
++	$(CC1) $(CFLAGS) -o $(BUILD)/linkhook.s < $(BUILD)/linkhook.i
++	$(AS) $(ASFLAGS) -o $@ $(BUILD)/linkhook.s
++
++$(BUILD)/linkhook_asm.o: linkhook_asm.s $(BUILD)/shim.bin
++	$(AS) $(ASFLAGS) -o $@ $<
++
++$(BUILD)/%.o: %.c *.h gba/*.h | $(BUILD)
++	$(CPP) $(CPPFLAGS) $< -o $(BUILD)/$*.i
++	$(CC1) $(CFLAGS) -o $(BUILD)/$*.s < $(BUILD)/$*.i
++	$(AS) $(ASFLAGS) -o $@ $(BUILD)/$*.s
++
++$(BUILD)/repro_%.o: $(REPRO)/repro_%.c ../../payload/include/repro_*.h gba/*.h | $(BUILD)
++	$(CPP) $(CPPFLAGS) $< -o $(BUILD)/repro_$*.i
++	$(CC1) $(CFLAGS) -o $(BUILD)/repro_$*.s < $(BUILD)/repro_$*.i
++	$(AS) $(ASFLAGS) -o $@ $(BUILD)/repro_$*.s
++
++$(BUILD):
++	mkdir -p $@
++
++clean:
++	rm -rf $(BUILD) linkhook.bin
++
++.PHONY: all clean
+diff --git a/repro_tools/xdlink/analyze_xd.py b/repro_tools/xdlink/analyze_xd.py
+new file mode 100644
+index 0000000..d094899
+--- /dev/null
++++ b/repro_tools/xdlink/analyze_xd.py
+@@ -0,0 +1,389 @@
++#!/usr/bin/env python3
++"""Finds, in one of Pokemon XD's GBA link programs, everything the batteryless
++save fix needs: where the program decompresses, the flash library functions,
++the call sites to redirect and the flash library's variables.
++
++usage: analyze_xd.py PROGRAM.gba [...]   (programs from patch_colosseum_iso.py extract)
++
++The flash library in XD's programs is byte-identical to the one in Colosseum's
++program, so its functions are found by matching the compiled colosseum-mb
++payload (built in ../../payload) with the literal pools and BL offsets masked.
++"""
++import json
++import os
++import re
++import struct
++import subprocess
++import sys
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++PAYLOAD = os.path.normpath(os.path.join(HERE, '..', '..', 'payload'))
++BASE = 0x02000000
++HASH_BASIS = 0x811C9DC5
++JOY_TRANS = 0x04000154
++
++# The IWRAM loader at the end of each program, as copied to 0x03000000: it moves
++# the compressed program to the top of EWRAM, decompresses it to 0x02000000 and
++# jumps there. Offsets of the parts the fix uses or changes:
++LOADER_SIZE = 0x1C4
++LOADER_JUMP = 0x1AC        # "bx r5" (r5 = 0x02000000)
++LOADER_SPARE = 0x1BC       # epilogue that is never reached; holds the new jump target
++LOADER_LITS = 0x1B4        # blob end, blob start
++FLASH_LIB_SIZE = 0xC00     # SwitchFlashBank to the end of agb_flash_le
++SHIM_ADDR = 0x0203E800     # where the hook puts the shim (shim.ld)
++# The programs allocate the save blocks after their .bss: an initial gap and a
++# gap after each block of up to 60 bytes, two copies of SaveBlock1, SaveBlock2
++# and the PC storage. Sizes are the cart's; Emerald's are the largest.
++SAVE_BLOCKS_MAX = 5 * 60 + 2 * 0x3D88 + 0xF2C + 0x83D0
++
++
++def fnv_words(data, h=HASH_BASIS):
++    for (w,) in struct.iter_unpack('<I', data[:len(data) // 4 * 4]):
++        h = ((h ^ w) * 0x01000193) & 0xFFFFFFFF
++    return h
++
++
++def lz77_decode(src, pos):
++    hdr = struct.unpack_from('<I', src, pos)[0]
++    if hdr & 0xFF != 0x10:
++        raise ValueError('not LZ77')
++    size = hdr >> 8
++    pos += 4
++    out = bytearray()
++    while len(out) < size:
++        flags = src[pos]
++        pos += 1
++        for bit in range(8):
++            if len(out) >= size:
++                break
++            if flags & (0x80 >> bit):
++                v = (src[pos] << 8) | src[pos + 1]
++                pos += 2
++                disp = (v & 0xFFF) + 1
++                for _ in range((v >> 12) + 3):
++                    out.append(out[-disp])
++            else:
++                out.append(src[pos])
++                pos += 1
++    return bytes(out), pos
++
++
++def loader_template(prog, off):
++    """The loader with its two literals blanked, for comparing programs."""
++    t = bytearray(prog[off:off + LOADER_SIZE])
++    t[LOADER_LITS:LOADER_LITS + 8] = bytes(8)
++    return bytes(t)
++
++
++def find_loader(prog):
++    """The stub's main DMA-copies the loader from the end of the image to
++    0x03000000 and calls 0x03000130; the literals give the blob."""
++    for off in range(len(prog) - 0x400, len(prog) - LOADER_SIZE + 1, 4):
++        if off < 0:
++            continue
++        if prog[off + LOADER_JUMP:off + LOADER_JUMP + 4] != bytes.fromhex('15ff2fe1'):   # bx r5
++            continue
++        if prog[off + LOADER_JUMP - 4:off + LOADER_JUMP] != bytes.fromhex('0fe0a0e1'):   # mov lr, pc
++            continue
++        end, start = struct.unpack_from('<II', prog, off + LOADER_LITS)
++        if BASE <= start < end <= BASE + len(prog):
++            return off, start - BASE, end - BASE
++    return None
++
++
++# ------------------------------------------------------------------ signatures
++
++def payload_symbols():
++    elf = os.path.join(PAYLOAD, 'payload.elf')
++    out = subprocess.run(['arm-none-eabi-nm', '-n', elf], capture_output=True, text=True, check=True).stdout
++    funcs, alls, names = [], set(), {}
++    for line in out.splitlines():
++        p = line.split()
++        if len(p) != 3:
++            continue
++        a = int(p[0], 16)
++        if not BASE <= a < BASE + 0x40000:
++            continue
++        alls.add(a & ~1)
++        names.setdefault(a & ~1, p[2])
++        if p[1] in 'tTwW':
++            funcs.append((a & ~1, p[2]))
++    return funcs, sorted(alls), names
++
++
++def thumb_mask(code, base):
++    wild = bytearray(len(code))
++    i = 0
++    while i + 1 < len(code):
++        h = struct.unpack_from('<H', code, i)[0]
++        if (h & 0xF800) == 0x4800:
++            t = ((base + i + 4) & ~3) + (h & 0xFF) * 4 - base
++            for k in range(4):
++                if 0 <= t + k < len(code):
++                    wild[t + k] = 1
++        if (h & 0xF800) == 0xF000 and i + 3 < len(code) and (struct.unpack_from('<H', code, i + 2)[0] & 0xF800) == 0xF800:
++            wild[i:i + 4] = b'\1\1\1\1'
++            i += 4
++            continue
++        i += 2
++    return wild
++
++
++class Matcher:
++    def __init__(self):
++        self.funcs, self.alls, self.names = payload_symbols()
++        self.src = open(os.path.join(PAYLOAD, 'payload.gba'), 'rb').read()
++
++    def func_bytes(self, name):
++        for a, n in self.funcs:
++            if n == name:
++                nxt = [x for x in self.alls if x > a]
++                end = nxt[0] if nxt else a + 0x40
++                return a, self.src[a - BASE:end - BASE]
++        raise KeyError(name)
++
++    def find(self, img, name):
++        a, code = self.func_bytes(name)
++        wild = thumb_mask(code, a)
++        rx = re.compile(b''.join(b'.' if w else re.escape(bytes([b])) for b, w in zip(code, wild)), re.DOTALL)
++        hits = [BASE + m.start() for m in rx.finditer(img)]
++        return hits
++
++    def literal_names(self, name):
++        """Symbol names of the literals in a payload function, by pool offset."""
++        a, code = self.func_bytes(name)
++        out = {}
++        for i in range(0, len(code) - 1, 2):
++            h = struct.unpack_from('<H', code, i)[0]
++            if (h & 0xF800) == 0x4800:
++                t = ((a + i + 4) & ~3) + (h & 0xFF) * 4 - a
++                v = struct.unpack_from('<I', code, t)[0]
++                out[t] = self.names.get(v, '0x%08X' % v)
++        return out
++
++
++def bl_sites(img, target):
++    out = []
++    for i in range(0, len(img) - 3, 2):
++        h1, h2 = struct.unpack_from('<HH', img, i)
++        if (h1 & 0xF800) == 0xF000 and (h2 & 0xF800) == 0xF800:
++            off = ((h1 & 0x7FF) << 12) | ((h2 & 0x7FF) << 1)
++            if off & 0x400000:
++                off -= 0x800000
++            if BASE + i + 4 + off == target:
++                out.append(BASE + i)
++    return out
++
++
++def bl_target(img, site):
++    h1, h2 = struct.unpack_from('<HH', img, site - BASE)
++    off = ((h1 & 0x7FF) << 12) | ((h2 & 0x7FF) << 1)
++    if off & 0x400000:
++        off -= 0x800000
++    return site + 4 + off
++
++
++def func_start(img, addr):
++    """Start of the Thumb function holding 'addr': the nearest push {.., lr} before it."""
++    a = addr
++    while a > BASE:
++        a -= 2
++        if (struct.unpack_from('<H', img, a - BASE)[0] & 0xFF00) == 0xB500:
++            return a
++    raise ValueError('no function start before %08X' % addr)
++
++
++def pointer_refs(img, fn):
++    return [BASE + m.start() for m in re.finditer(re.escape(struct.pack('<I', fn | 1)), img)]
++
++
++def lit_loads(img, value):
++    out = []
++    for i in range(0, len(img) - 1, 2):
++        h = struct.unpack_from('<H', img, i)[0]
++        if (h & 0xF800) == 0x4800:
++            a = ((BASE + i + 4) & ~3) + (h & 0xFF) * 4 - BASE
++            if 0 <= a <= len(img) - 4 and struct.unpack_from('<I', img, a)[0] == value:
++                out.append(BASE + i)
++    return out
++
++
++def check_memory(img):
++    """Highest EWRAM address the program uses; refuses programs that might use
++    the shim's area."""
++    end_img = BASE + len(img)
++    bss_end = None
++    for r in lit_loads(img, end_img):
++        h = struct.unpack_from('<H', img, r - BASE)[0]
++        pool = ((r + 4) & ~3) + (h & 0xFF) * 4
++        nxt = struct.unpack_from('<I', img, pool - BASE + 4)[0]
++        if end_img < nxt < BASE + 0x40000:
++            bss_end = nxt
++    if bss_end is None:
++        raise ValueError('end of .bss not found')
++    for i in range(0, len(img) - 1, 2):
++        h = struct.unpack_from('<H', img, i)[0]
++        if (h & 0xF800) == 0x4800:
++            a = ((BASE + i + 4) & ~3) + (h & 0xFF) * 4 - BASE
++            if 0 <= a <= len(img) - 4:
++                v = struct.unpack_from('<I', img, a)[0]
++                if bss_end < v < BASE + 0x40000:
++                    raise ValueError('uses EWRAM at %08X, past its .bss' % v)
++    mem_end = bss_end + SAVE_BLOCKS_MAX
++    if mem_end + 0x400 > SHIM_ADDR:
++        raise ValueError('may use EWRAM up to %08X, too close to the shim' % mem_end)
++    return mem_end
++
++
++def find_save_link(img):
++    """The link code's save step: SavePhase(0), wait for the GameCube, SavePhase(1),
++    with JOY_TRANS written in between (Colosseum's sub_02005FCC). Returns
++    (function, [site0, site1], SavePhase)."""
++    found = []
++    for i in range(0, len(img) - 3, 2):
++        if struct.unpack_from('<H', img, i)[0] != 0x2000:          # movs r0, #0
++            continue
++        site0 = BASE + i + 2
++        h1, h2 = struct.unpack_from('<HH', img, i + 2)
++        if (h1 & 0xF800) != 0xF000 or (h2 & 0xF800) != 0xF800:
++            continue
++        t = bl_target(img, site0)
++        for j in range(i + 6, min(i + 0x60, len(img) - 5), 2):
++            if struct.unpack_from('<H', img, j)[0] == 0x2001:       # movs r0, #1
++                h1, h2 = struct.unpack_from('<HH', img, j + 2)
++                if (h1 & 0xF800) == 0xF000 and (h2 & 0xF800) == 0xF800 and bl_target(img, BASE + j + 2) == t:
++                    window = img[i:j + 0x60]
++                    if struct.pack('<I', JOY_TRANS) in window:
++                        found.append((site0, BASE + j + 2, t))
++                    break
++    return found
++
++
++def analyze(path, matcher):
++    prog = open(path, 'rb').read()
++    res = {'file': os.path.basename(path), 'recvSize': len(prog) // 4 * 4}
++    res['recvHash'] = fnv_words(prog[:res['recvSize']])
++    ld = find_loader(prog)
++    if not ld:
++        raise ValueError('no XD loader found')
++    off, bstart, bend = ld
++    res.update(loaderOffset=off, blobStart=bstart, blobEnd=bend)
++    img, used = lz77_decode(prog, bstart)
++    if used > bend:
++        raise ValueError('compressed data runs past the blob')
++    res['decSize'] = len(img) // 4 * 4
++    res['decHash'] = fnv_words(img[:res['decSize']])
++    res['memEnd'] = check_memory(img)
++
++    def one(name):
++        hits = matcher.find(img, name)
++        if len(hits) != 1:
++            raise ValueError('%s: %d matches' % (name, len(hits)))
++        return hits[0]
++
++    f = {n: one(n) for n in ('IdentifyFlash', 'ReadFlash', 'VerifyFlashSector', 'VerifyFlashSectorNBytes',
++                             'ProgramFlashSectorAndVerify', 'ProgramFlashSectorAndVerifyNBytes', 'ReadFlashId',
++                             'SwitchFlashBank', 'm4aSoundVSyncOff', 'm4aSoundVSyncOn')}
++    # variables, from IdentifyFlash's literal pool (same layout as the payload's)
++    lit = matcher.literal_names('IdentifyFlash')
++    want = {'ProgramFlashByte': 'programFlashByte', 'ProgramFlashSector': 'programFlashSector',
++            'EraseFlashChip': 'eraseFlashChip', 'EraseFlashSector': 'eraseFlashSector',
++            'WaitForFlashWrite': 'waitForFlashWrite', 'gFlashMaxTime': 'flashMaxTime', 'gFlash': 'flash'}
++    var = {}
++    for pool_off, sym in lit.items():
++        if sym in want:
++            var[want[sym]] = struct.unpack_from('<I', img, f['IdentifyFlash'] - BASE + pool_off)[0]
++    if len(var) != len(want):
++        raise ValueError('flash variables not all found: %s' % var)
++
++    sites = {
++        'identify': bl_sites(img, f['IdentifyFlash']),
++        'read': bl_sites(img, f['ReadFlash']),
++        'verify': bl_sites(img, f['VerifyFlashSector']),
++        'verifyN': bl_sites(img, f['VerifyFlashSectorNBytes']),
++    }
++    # Nothing else may reach the chip directly.
++    others = {n: bl_sites(img, f[n]) for n in ('ReadFlashId', 'SwitchFlashBank')}
++    for n, s in others.items():
++        # agb_flash, agb_flash_1m, agb_flash_mx and agb_flash_le sit together
++        inside = [x for x in s if f['SwitchFlashBank'] <= x < f['SwitchFlashBank'] + FLASH_LIB_SIZE]
++        if s != inside:
++            raise ValueError('%s is called from outside the flash library: %s' % (n, s))
++    if len(sites['identify']) != 1 or len(sites['verify']) != 1 or len(sites['verifyN']) != 1 or not sites['read']:
++        raise ValueError('unexpected call sites: %s' % sites)
++    if not (f['ProgramFlashSectorAndVerify'] < sites['verify'][0] < f['ProgramFlashSectorAndVerifyNBytes']):
++        raise ValueError('VerifyFlashSector called from an unexpected place')
++    if not (f['ProgramFlashSectorAndVerifyNBytes'] < sites['verifyN'][0] < f['IdentifyFlash']):
++        raise ValueError('VerifyFlashSectorNBytes called from an unexpected place')
++    # Every way to change the save must go through SavePhase, so that a commit
++    # after each SavePhase call writes all changes to the cart.
++    lib_lo, lib_hi = f['SwitchFlashBank'], f['SwitchFlashBank'] + FLASH_LIB_SIZE
++    writers = set(bl_sites(img, f['ProgramFlashSectorAndVerify']) + bl_sites(img, f['ProgramFlashSectorAndVerifyNBytes']))
++    for v in ('programFlashByte', 'programFlashSector', 'eraseFlashChip', 'eraseFlashSector'):
++        writers |= set(x for x in lit_loads(img, var[v]) if not lib_lo <= x < lib_hi)
++    def closure_upto(stop):
++        """Functions that can reach a save write, walking callers up to 'stop'."""
++        seen = set()
++        todo = [func_start(img, x) for x in writers]
++        while todo:
++            fn = todo.pop()
++            if fn in seen:
++                continue
++            seen.add(fn)
++            if fn != stop:
++                todo += [func_start(img, x) for x in bl_sites(img, fn)]
++        return seen
++
++    def sealed(closure, stop):
++        """True when nothing outside 'closure' can enter it except through 'stop'."""
++        for fn in closure - {stop}:
++            if pointer_refs(img, fn):
++                return False
++            if any(func_start(img, x) not in closure for x in bl_sites(img, fn)):
++                return False
++        return True
++
++    save_phase = None
++    for s0, s1, t in find_save_link(img):
++        c = closure_upto(t)
++        if t in c and sealed(c, t) and sorted(bl_sites(img, t)) == sorted([s0, s1]):
++            if save_phase is not None:
++                raise ValueError('save step: more than one candidate')
++            save_phase = t
++            sites['savePhase'] = [s0, s1]
++    if save_phase is None:
++        if not sealed(closure_upto(None), None):
++            raise ValueError('the save can be written without going through a save step')
++        sites['savePhase'] = []
++    res['canWrite'] = save_phase is not None
++    res['functions'] = {
++        'identifyFlash': f['IdentifyFlash'] | 1, 'readFlash': f['ReadFlash'] | 1,
++        'verifyFlashSector': f['VerifyFlashSector'] | 1, 'verifyFlashSectorNBytes': f['VerifyFlashSectorNBytes'] | 1,
++        'savePhase': (save_phase | 1) if save_phase else 0, 'soundVSyncOff': f['m4aSoundVSyncOff'] | 1, 'soundVSyncOn': f['m4aSoundVSyncOn'] | 1,
++    }
++    res['variables'] = var
++    res['sites'] = sites
++    res['siteBytes'] = {k: [img[s - BASE:s - BASE + 4].hex() for s in v] for k, v in sites.items()}
++    return res, prog, img
++
++
++def main(argv):
++    m = Matcher()
++    out = []
++    for p in argv[1:]:
++        try:
++            r, prog, img = analyze(p, m)
++        except ValueError as e:
++            print('%s: not usable (%s)' % (os.path.basename(p), e))
++            continue
++        out.append(r)
++        print('%s: loader 0x%X, image %d bytes, memory up to %08X, writes %s, IdentifyFlash %08X, SavePhase %08X, sites %s' % (
++            r['file'], r['loaderOffset'], r['decSize'], r['memEnd'], r['canWrite'], r['functions']['identifyFlash'] & ~1,
++            r['functions']['savePhase'] & ~1, {k: ['%08X' % x for x in v] for k, v in r['sites'].items()}))
++    if out:
++        json.dump(out, sys.stdout if False else open(os.devnull, 'w'))
++    return out
++
++
++if __name__ == '__main__':
++    main(sys.argv)
+diff --git a/repro_tools/xdlink/emerald_hook.py b/repro_tools/xdlink/emerald_hook.py
+new file mode 100644
+index 0000000..dd65add
+--- /dev/null
++++ b/repro_tools/xdlink/emerald_hook.py
+@@ -0,0 +1,78 @@
++"""Emerald (BPEE) changes for the XD link hook.
++
++Emerald's copyright screen code (SetUpCopyrightScreen, case 141) checks the
++received program's game code and swaps in its own Colosseum program:
++
++    0816CE52  ldr r6, =0x020000AC        becomes  ldr r0, =LinkHook+1
++    0816CE54  ldr r4, [r6]                        bl  _call_via_r0
++    0816CE56  ldr r0, =0x65366347
++    0816CE58  cmp r4, r0                          b   0x0816CE6C
++    ...       (the swap, now done by LinkHook; left as dead code)
++    0816CE6C  adds r0, r5, #0                     (unchanged: run the program)
++    0816CE88  .word 0x089AA144                    .word LinkHook+1
++
++linkhook.bin goes in the unused tail of the area that holds Emerald's
++Colosseum program (zero in every build, also after the repro patch).
++"""
++import struct
++
++HOOK_ADDR = 0x089C2000           # must match ROM_ADDR in Makefile
++CODE_AT = 0x16CE52
++LITERAL_AT = 0x16CE88
++CALL_VIA_R0 = 0x082E70D0
++RESUME = 0x0816CE6C
++PROGRAM_AT = 0x9AA144
++PROGRAM_SIZE = 0x28000
++
++ORIGINAL_CODE = bytes.fromhex('0b4e' '3468' '0b48' '8442')     # ldr r6; ldr r4,[r6]; ldr r0; cmp r4,r0
++ORIGINAL_LITERALS = struct.pack('<III', 0x020000AC, 0x65366347, 0x089AA144)
++CALL_VIA_R0_CODE = bytes.fromhex('0047c046' '0847c046')
++
++
++def thumb_bl(at, target):
++    off = target - (at + 4)
++    assert -0x400000 <= off < 0x400000 and not off & 1
++    return struct.pack('<HH', 0xF000 | ((off >> 12) & 0x7FF), 0xF800 | ((off >> 1) & 0x7FF))
++
++
++HOOK_MAGIC = 0x4B4F4F48       # "HOOK"
++
++
++def hook_info(hook_bin):
++    """linkhook.bin starts with LinkHook's address, a magic word and its size."""
++    entry, magic, size = struct.unpack_from('<III', hook_bin, 0)
++    if magic != HOOK_MAGIC or size != len(hook_bin) or not HOOK_ADDR < entry < HOOK_ADDR + size or not entry & 1:
++        raise ValueError('linkhook.bin is damaged')
++    return entry
++
++
++def changes(rom, hook_bin):
++    """[(offset, new bytes)] that install the hook in 'rom' (a dump of BPEE, with or
++    without the repro Colosseum program). Refuses anything unexpected."""
++    link_hook = hook_info(hook_bin)
++    if bytes(rom[0xAC:0xB0]) != b'BPEE':
++        raise ValueError('not US Emerald (BPEE)')
++    if bytes(rom[CODE_AT:CODE_AT + 8]) != ORIGINAL_CODE:
++        raise ValueError('the copyright screen code is not the one this patch expects')
++    if bytes(rom[LITERAL_AT - 8:LITERAL_AT + 4]) != ORIGINAL_LITERALS:
++        raise ValueError('the copyright screen literals are not the ones this patch expects')
++    if bytes(rom[CALL_VIA_R0 - 0x08000000:CALL_VIA_R0 - 0x08000000 + 8]) != CALL_VIA_R0_CODE:
++        raise ValueError('_call_via_r0 is not where this patch expects it')
++    hook_off = HOOK_ADDR - 0x08000000
++    tail_end = PROGRAM_AT + PROGRAM_SIZE
++    if not (PROGRAM_AT < hook_off and hook_off + len(hook_bin) <= tail_end):
++        raise ValueError('linkhook.bin does not fit in the Colosseum program area')
++    if any(rom[hook_off:hook_off + len(hook_bin)]):
++        raise ValueError('the area for linkhook.bin is not empty')
++    code = struct.pack('<H', 0x480D)                       # ldr r0, [pc, #0x34] -> 0x0816CE88
++    code += thumb_bl(0x08000000 + CODE_AT + 2, CALL_VIA_R0)
++    code += struct.pack('<H', 0xE000 | (((RESUME - (0x08000000 + CODE_AT + 6 + 4)) >> 1) & 0x7FF))
++    assert len(code) == 8
++    return [(CODE_AT, code), (LITERAL_AT, struct.pack("<I", link_hook)), (hook_off, bytes(hook_bin))]
++
++
++def apply(rom, hook_bin):
++    out = bytearray(rom)
++    for off, data in changes(rom, hook_bin):
++        out[off:off + len(data)] = data
++    return out
+diff --git a/repro_tools/xdlink/gba/flash_internal.h b/repro_tools/xdlink/gba/flash_internal.h
+new file mode 100644
+index 0000000..0cfb332
+--- /dev/null
++++ b/repro_tools/xdlink/gba/flash_internal.h
+@@ -0,0 +1,39 @@
++#ifndef GUARD_GBA_FLASH_INTERNAL_H
++#define GUARD_GBA_FLASH_INTERNAL_H
++
++// Stand-in for payload/include/gba/flash_internal.h when the repro backend is
++// built into the XD shim: the flash library's variables are the ones inside
++// XD's program, at the addresses in gXdParams.
++
++#include "xd_params.h"
++
++struct FlashSector
++{
++    u32 size;
++    u8 shift;
++    u16 count;
++    u16 top;
++};
++
++struct FlashType {
++    u32 romSize;
++    struct FlashSector sector;
++    u16 wait[2]; // game pak bus read/write wait
++    union {
++        struct {
++        u8 makerId;
++        u8 deviceId;
++        } separate;
++        u16 joined;
++    } ids;
++};
++
++#define ProgramFlashByte   (*(u16 (**)(u16, u32, u8))gXdParams.programFlashByte)
++#define ProgramFlashSector (*(u16 (**)(u16, void *))gXdParams.programFlashSector)
++#define EraseFlashChip     (*(u16 (**)(void))gXdParams.eraseFlashChip)
++#define EraseFlashSector   (*(u16 (**)(u16))gXdParams.eraseFlashSector)
++#define WaitForFlashWrite  (*(u16 (**)(u8, u8 *, u8))gXdParams.waitForFlashWrite)
++#define gFlashMaxTime      (*(const u16 **)gXdParams.flashMaxTime)
++#define gFlash             (*(const struct FlashType **)gXdParams.flash)
++
++#endif // GUARD_GBA_FLASH_INTERNAL_H
+diff --git a/repro_tools/xdlink/linkhook.bin b/repro_tools/xdlink/linkhook.bin
+new file mode 100755
+index 0000000000000000000000000000000000000000..1b81fe18d541c884e2a237008eac3df90bb3cd51
+GIT binary patch
+literal 8424
+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
+T2rvpf3mgEB0Z#)V=;Z$a=7d@M
+
+literal 0
+HcmV?d00001
+
+diff --git a/repro_tools/xdlink/linkhook.c b/repro_tools/xdlink/linkhook.c
+new file mode 100644
+index 0000000..2bd70b8
+--- /dev/null
++++ b/repro_tools/xdlink/linkhook.c
+@@ -0,0 +1,131 @@
++// Emerald's link hook, in free cart ROM.
++//
++// On the copyright screen Emerald receives a program from the GameCube and
++// runs it. Originally it swapped in its own Colosseum program when the
++// received one had Colosseum's game code; the flasher changes that code to a
++// call to LinkHook, which does the same swap and also prepares XD's programs:
++//
++//  1. LinkHook (before the program runs): when the received program is one of
++//     XD's link programs, its loader is changed to jump to XdPostLoad instead
++//     of the decompressed program.
++//  2. XdPostLoad (after the loader has decompressed the program): checks the
++//     result, copies the shim (xd_shim.c and the repro backend) to EWRAM,
++//     redirects the program's flash and save calls to it and starts the
++//     program.
++//
++// Anything that does not match exactly is left alone and runs as before.
++
++#include "repro_types.h"
++#include "xd_link.h"
++#include "shim_syms.h"
++
++#define EWRAM               0x02000000
++#define GAME_CODE           (*(vu32 *)(EWRAM + 0xAC))
++#define COLOSSEUM_GAME_CODE 0x65366347  // "Gc6e"
++#define XD_GAME_CODE        0x54534554  // "TEST"
++#define HASH_BASIS          0x811C9DC5
++#define MARK_ADDR           0x0203FFF0  // above where the loader puts the compressed program
++#define MARK_MAGIC          0x4B4E4C58  // "XLNK"
++
++extern const u8 gShimImage[];
++extern const u8 gShimImageEnd[];
++extern const u32 gColosseumProgram;     // ROM address of Emerald's Colosseum program
++void CpuSet(const void *src, void *dest, u32 control);
++void XdPostLoadArm(void);
++void JumpToProgram(void);
++
++static u32 Hash(const void *src, u32 bytes)
++{
++    const u32 *p = src;
++    u32 h = HASH_BASIS;
++
++    for (bytes /= 4; bytes != 0; bytes--)
++        h = (h ^ *p++) * 0x01000193;
++    return h;
++}
++
++static void PrepareXd(void)
++{
++    u32 i;
++
++    for (i = 0; i < gNumXdPrograms; i++)
++    {
++        const struct XdProgram *p = &gXdPrograms[i];
++        u32 *loader = (u32 *)(EWRAM + p->loaderOffset);
++        u32 *lits = (u32 *)((u8 *)loader + XD_LOADER_LITS);
++
++        // The literals are a quick filter; the hash checks the whole program.
++        if (lits[0] != EWRAM + p->blobEnd || lits[1] != EWRAM + p->blobStart)
++            continue;
++        if (Hash((const void *)EWRAM, p->recvSize) != p->recvHash)
++            continue;
++        loader[XD_LOADER_JUMP / 4] = 0xE59FF008;   // ldr pc, [pc, #8]
++        loader[XD_LOADER_SPARE / 4] = (u32)XdPostLoadArm;
++        ((vu32 *)MARK_ADDR)[0] = MARK_MAGIC;
++        ((vu32 *)MARK_ADDR)[1] = i;
++        ((vu32 *)MARK_ADDR)[2] = ~i;
++        return;
++    }
++}
++
++// Called by Emerald (through _call_via_r0) once a program has been received,
++// in place of its Colosseum check.
++void LinkHook(void)
++{
++    u32 code = GAME_CODE;
++
++    if (code == COLOSSEUM_GAME_CODE)
++    {
++        // What Emerald did here: run its own Colosseum program instead.
++        CpuSet((const void *)gColosseumProgram, (void *)EWRAM, 0x28000 / 2);
++        GAME_CODE = code;
++        return;
++    }
++    if (code == XD_GAME_CODE)
++        PrepareXd();
++}
++
++static void WriteBL(u32 site, u32 target)
++{
++    s32 off = (s32)(target & ~1) - (s32)(site + 4);
++
++    ((vu16 *)site)[0] = 0xF000 | ((off >> 12) & 0x7FF);
++    ((vu16 *)site)[1] = 0xF800 | ((off >> 1) & 0x7FF);
++}
++
++static const u32 sShimCalls[XD_CALL_COUNT] =
++{
++    [XD_CALL_IDENTIFY]   = SHIM_Xd_IdentifyFlash,
++    [XD_CALL_READ]       = SHIM_Xd_ReadFlash,
++    [XD_CALL_VERIFY]     = SHIM_Xd_VerifyFlashSector,
++    [XD_CALL_VERIFY_N]   = SHIM_Xd_VerifyFlashSectorNBytes,
++    [XD_CALL_SAVE_PHASE] = SHIM_Xd_SavePhase,
++};
++
++// Entered (through XdPostLoadArm) from XD's loader, with the program
++// decompressed at 0x02000000 and interrupts off. Never returns.
++void XdPostLoad(void)
++{
++    vu32 *mark = (vu32 *)MARK_ADDR;
++    const struct XdProgram *p = NULL;
++    u32 i;
++
++    if (mark[0] == MARK_MAGIC && mark[1] < gNumXdPrograms && mark[2] == ~mark[1])
++        p = &gXdPrograms[mark[1]];
++    mark[0] = 0;
++
++    if (p != NULL && Hash((const void *)EWRAM, p->decSize) == p->decHash)
++    {
++        const u8 *src = gShimImage;
++        u8 *dst = (u8 *)SHIM___shim_start;
++
++        while (src < gShimImageEnd)
++            *dst++ = *src++;
++        while ((u32)dst < SHIM___shim_bss_end)
++            *dst++ = 0;
++        *(struct XdParams *)SHIM_gXdParams = p->params;
++        for (i = 0; i < p->numSites; i++)
++            WriteBL(p->sites[i].addr, sShimCalls[p->sites[i].call]);
++    }
++    JumpToProgram();
++}
+diff --git a/repro_tools/xdlink/linkhook_asm.s b/repro_tools/xdlink/linkhook_asm.s
+new file mode 100644
+index 0000000..5e1ef8a
+--- /dev/null
++++ b/repro_tools/xdlink/linkhook_asm.s
+@@ -0,0 +1,45 @@
++@ Small pieces of the link hook that C can't express.
++
++@ linkhook.bin starts with this: what the flasher builder needs to install it.
++    .section .hookhead, "a"
++    .align 2
++    .word   LinkHook                @ Thumb entry (bit 0 set by the linker)
++    .word   0x4B4F4F48              @ "HOOK"
++    .word   __hook_size
++
++    .text
++    .align 2
++
++@ Entered in ARM state from XD's loader (ldr pc, [pc, #8]).
++    .arm
++    .global XdPostLoadArm
++XdPostLoadArm:
++    ldr     r0, =XdPostLoad
++    bx      r0
++
++    .thumb
++    .align 2
++    .global CpuSet
++    .thumb_func
++CpuSet:
++    swi     0x0B
++    bx      lr
++
++@ Starts the decompressed program at 0x02000000 in ARM state, as XD's loader does.
++    .global JumpToProgram
++    .thumb_func
++JumpToProgram:
++    ldr     r0, =0x02000000
++    bx      r0
++
++    .align 2
++    .pool
++
++@ The shim, copied to EWRAM by XdPostLoad.
++    .section .rodata
++    .align 2
++    .global gShimImage, gShimImageEnd
++gShimImage:
++    .incbin "build/shim.bin"
++gShimImageEnd:
++    .align 2
+diff --git a/repro_tools/xdlink/make_xd_tables.py b/repro_tools/xdlink/make_xd_tables.py
+new file mode 100644
+index 0000000..e923351
+--- /dev/null
++++ b/repro_tools/xdlink/make_xd_tables.py
+@@ -0,0 +1,75 @@
++#!/usr/bin/env python3
++"""Writes xd_tables.c, the list of XD link programs the link hook fixes.
++
++usage: make_xd_tables.py OUTPUT.c PROGRAM.gba [...]
++
++The programs come from patch_colosseum_iso.py extract on an XD disc. Only
++addresses, sizes and hashes go into the output, no bytes of XD's programs.
++"""
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import analyze_xd as A                                   # noqa: E402
++
++COLOSSEUM_PROGRAM = 0x089AA144       # Emerald (BPEE) gMultiBootProgram_PokemonColosseum
++CALLS = [('identify', 'XD_CALL_IDENTIFY'), ('read', 'XD_CALL_READ'), ('verify', 'XD_CALL_VERIFY'),
++         ('verifyN', 'XD_CALL_VERIFY_N'), ('savePhase', 'XD_CALL_SAVE_PHASE')]
++PARAMS = ['identifyFlash', 'readFlash', 'verifyFlashSector', 'verifyFlashSectorNBytes', 'savePhase',
++          'soundVSyncOff', 'soundVSyncOn']
++VARS = ['programFlashByte', 'programFlashSector', 'eraseFlashChip', 'eraseFlashSector', 'waitForFlashWrite',
++        'flashMaxTime', 'flash']
++
++
++def main(argv):
++    if len(argv) < 3:
++        print(__doc__)
++        return 2
++    m = A.Matcher()
++    entries, template = [], None
++    for path in argv[2:]:
++        try:
++            r, prog, img = A.analyze(path, m)
++        except ValueError as e:
++            print('skipped %s: %s' % (os.path.basename(path), e))
++            continue
++        t = A.loader_template(prog, r['loaderOffset'])
++        if template is None:
++            template = t
++        elif t != template:
++            raise SystemExit('error: %s has a different loader' % path)
++        sites = [(s, c) for k, c in CALLS for s in r['sites'][k]]
++        if len(sites) > 8:
++            raise SystemExit('error: too many call sites in %s' % path)
++        entries.append((r, sites))
++        print('%-32s %s, %d sites' % (r['file'], 'trade (writes)' if r['canWrite'] else 'read only', len(sites)))
++    if not entries:
++        raise SystemExit('error: no usable XD program')
++
++    out = ['// Generated by make_xd_tables.py from XD\'s GBA link programs. Do not edit.',
++           '#include "xd_link.h"', '',
++           'const u32 gColosseumProgram = 0x%08X;' % COLOSSEUM_PROGRAM, '',
++           'const struct XdProgram gXdPrograms[] =', '{']
++    for r, sites in entries:
++        out.append('    {   // %s' % r['file'])
++        out.append('        0x%X, 0x%08X, 0x%X, 0x%X, 0x%X, 0x%X, 0x%08X,' % (
++            r['recvSize'], r['recvHash'], r['loaderOffset'], r['blobStart'], r['blobEnd'], r['decSize'], r['decHash']))
++        out.append('        %d,' % len(sites))
++        out.append('        {')
++        for s, c in sites:
++            out.append('            {0x%08X, %s},' % (s, c))
++        out.append('        },')
++        vals = [r['functions'][k] for k in PARAMS] + [r['variables'][k] for k in VARS]
++        out.append('        {')
++        for k, v in zip(PARAMS + VARS, vals):
++            out.append('            0x%08X, // %s' % (v, k))
++        out.append('        },')
++        out.append('    },')
++    out += ['};', '', 'const u32 gNumXdPrograms = %d;' % len(entries), '']
++    open(argv[1], 'w').write('\n'.join(out))
++    print('wrote %s: %d programs' % (argv[1], len(entries)))
++    return 0
++
++
++if __name__ == '__main__':
++    sys.exit(main(sys.argv))
+diff --git a/repro_tools/xdlink/rom.ld b/repro_tools/xdlink/rom.ld
+new file mode 100644
+index 0000000..07cbab4
+--- /dev/null
++++ b/repro_tools/xdlink/rom.ld
+@@ -0,0 +1,24 @@
++/* The link hook lives in cart ROM, in the unused tail of the area that holds
++   Emerald's Colosseum program. The address is passed with --defsym ROM_ADDR. */
++OUTPUT_ARCH(arm)
++
++SECTIONS
++{
++    .text ROM_ADDR :
++    {
++        __hook_start = .;
++        KEEP(build/linkhook_asm.o(.hookhead));
++        build/linkhook.o(.text);
++        *(.text .text.*);
++        *(.glue_7) *(.glue_7t);
++        *(.rodata .rodata.*);
++        *(.data .data.*);
++        . = ALIGN(4);
++        __hook_end = .;
++    }
++    __hook_size = __hook_end - __hook_start;
++
++    .bss (NOLOAD) : { *(.bss .bss.*) *(COMMON) }
++
++    /DISCARD/ : { *(.comment) *(.ARM.attributes) *(.note*) }
++}
+diff --git a/repro_tools/xdlink/shim.ld b/repro_tools/xdlink/shim.ld
+new file mode 100644
+index 0000000..0b227ac
+--- /dev/null
++++ b/repro_tools/xdlink/shim.ld
+@@ -0,0 +1,31 @@
++/* The XD shim runs from the top of EWRAM, above everything XD's programs use
++   (image, .bss and the save blocks they allocate after it; analyze_xd.py
++   checks this for each program). linkhook.c copies it there. The last 128
++   bytes stay free for the hook's marker. */
++OUTPUT_ARCH(arm)
++
++SECTIONS
++{
++    .text 0x0203E800 :
++    {
++        __shim_start = .;
++        *(.text .text.*);
++        *(.glue_7) *(.glue_7t);
++        *(.rodata .rodata.*);
++        *(.data .data.*);
++        . = ALIGN(4);
++        __shim_image_end = .;
++    }
++
++    .bss (NOLOAD) :
++    {
++        __shim_bss_start = .;
++        *(.bss .bss.*);
++        *(COMMON);
++        . = ALIGN(4);
++        __shim_bss_end = .;
++    }
++
++    /DISCARD/ : { *(.comment) *(.ARM.attributes) *(.note*) }
++}
++ASSERT(__shim_bss_end <= 0x0203FF80, "the shim is too large for the top of EWRAM")
+diff --git a/repro_tools/xdlink/xd_link.h b/repro_tools/xdlink/xd_link.h
+new file mode 100644
+index 0000000..9ad1cb2
+--- /dev/null
++++ b/repro_tools/xdlink/xd_link.h
+@@ -0,0 +1,41 @@
++#ifndef GUARD_XD_LINK_H
++#define GUARD_XD_LINK_H
++
++#include "repro_types.h"
++#include "xd_params.h"
++
++#define XD_MAX_SITES 8
++
++// The IWRAM loader at the end of each XD link program (identical in all of
++// them): it moves the compressed program to the top of EWRAM, decompresses it
++// to 0x02000000 and jumps there.
++#define XD_LOADER_SIZE  0x1C4
++#define XD_LOADER_JUMP  0x1AC   // "bx r5", the jump to 0x02000000
++#define XD_LOADER_SPARE 0x1BC   // never reached; holds the new jump target
++#define XD_LOADER_LITS  0x1B4   // blob end, blob start
++
++struct XdSite
++{
++    u32 addr;   // a BL instruction in the decompressed program
++    u32 call;   // XD_CALL_*
++};
++
++// One XD link program, as sent by the GameCube and after decompression.
++struct XdProgram
++{
++    u32 recvSize;       // bytes hashed of the program as received
++    u32 recvHash;
++    u32 loaderOffset;
++    u32 blobStart;      // compressed program, offsets in the received image
++    u32 blobEnd;
++    u32 decSize;        // bytes hashed after decompression
++    u32 decHash;
++    u32 numSites;
++    struct XdSite sites[XD_MAX_SITES];
++    struct XdParams params;
++};
++
++extern const struct XdProgram gXdPrograms[];
++extern const u32 gNumXdPrograms;
++
++#endif // GUARD_XD_LINK_H
+diff --git a/repro_tools/xdlink/xd_params.h b/repro_tools/xdlink/xd_params.h
+new file mode 100644
+index 0000000..49239b3
+--- /dev/null
++++ b/repro_tools/xdlink/xd_params.h
+@@ -0,0 +1,42 @@
++#ifndef GUARD_XD_PARAMS_H
++#define GUARD_XD_PARAMS_H
++
++#include "repro_types.h"
++
++// Addresses inside one of Pokemon XD's GBA link programs (after it has
++// decompressed itself), found by analyze_xd.py. The link hook copies the
++// matching set into the shim before the program starts.
++struct XdParams
++{
++    // XD's own functions, Thumb (bit 0 set)
++    u32 identifyFlash;
++    u32 readFlash;
++    u32 verifyFlashSector;
++    u32 verifyFlashSectorNBytes;
++    u32 savePhase;              // 0 when the program never writes the save
++    u32 soundVSyncOff;          // m4aSoundVSyncOff
++    u32 soundVSyncOn;           // m4aSoundVSyncOn
++    // XD's flash library variables
++    u32 programFlashByte;
++    u32 programFlashSector;
++    u32 eraseFlashChip;
++    u32 eraseFlashSector;
++    u32 waitForFlashWrite;
++    u32 flashMaxTime;
++    u32 flash;
++};
++
++// Which shim entry a redirected call goes to.
++enum
++{
++    XD_CALL_IDENTIFY,
++    XD_CALL_READ,
++    XD_CALL_VERIFY,
++    XD_CALL_VERIFY_N,
++    XD_CALL_SAVE_PHASE,
++    XD_CALL_COUNT
++};
++
++extern struct XdParams gXdParams;
++
++#endif // GUARD_XD_PARAMS_H
+diff --git a/repro_tools/xdlink/xd_shim.c b/repro_tools/xdlink/xd_shim.c
+new file mode 100644
+index 0000000..dbca550
+--- /dev/null
++++ b/repro_tools/xdlink/xd_shim.c
+@@ -0,0 +1,65 @@
++// Batteryless save fix for Pokemon XD's GBA link programs.
++//
++// XD sends its own GBA program, and Emerald runs it as sent. That program
++// looks for a flash save chip, which batteryless repro carts don't have. The
++// cart's link hook (linkhook.c) copies this code into free EWRAM and
++// redirects the program's calls to IdentifyFlash, ReadFlash,
++// VerifyFlashSector(NBytes) and its save step here. The save is then read
++// from and written to the cart's ROM flash by the same backend as the
++// Colosseum repro build (payload/src/repro), which is linked in unchanged.
++
++#include "repro_types.h"
++#include "gba/flash_internal.h"
++#include "repro_flash.h"
++#include "xd_params.h"
++
++struct XdParams gXdParams;
++
++u16 Xd_IdentifyFlash(void)
++{
++    // A save image inside cart ROM means a batteryless repro cart.
++    if (ReproFlash_Detect())
++        return 0;
++    return ((u16 (*)(void))gXdParams.identifyFlash)();
++}
++
++void Xd_ReadFlash(u16 sectorNum, u32 offset, void *dest, u32 size)
++{
++    if (gReproActive)
++    {
++        ReproFlash_Read(sectorNum, offset, dest, size);
++        return;
++    }
++    ((void (*)(u16, u32, void *, u32))gXdParams.readFlash)(sectorNum, offset, dest, size);
++}
++
++u32 Xd_VerifyFlashSector(u16 sectorNum, u8 *src)
++{
++    if (gReproActive)
++        return ReproFlash_Verify(sectorNum, src, REPRO_SECTOR_SIZE);
++    return ((u32 (*)(u16, u8 *))gXdParams.verifyFlashSector)(sectorNum, src);
++}
++
++u32 Xd_VerifyFlashSectorNBytes(u16 sectorNum, u8 *src, u32 n)
++{
++    if (gReproActive)
++        return ReproFlash_Verify(sectorNum, src, n);
++    return ((u32 (*)(u16, u8 *, u32))gXdParams.verifyFlashSectorNBytes)(sectorNum, src, n);
++}
++
++// The link code's save step: SavePhase(0) writes the save except one byte,
++// SavePhase(1) writes that byte. As in the Colosseum repro build, each phase
++// is written to cart ROM before its result goes back to the GameCube.
++bool32 Xd_SavePhase(s32 phase)
++{
++    bool32 failed = ((bool32 (*)(s32))gXdParams.savePhase)(phase);
++
++    if (!failed && gReproActive)
++    {
++        ((void (*)(void))gXdParams.soundVSyncOff)();
++        if (ReproFlash_Commit() != 0)
++            failed = TRUE;
++        ((void (*)(void))gXdParams.soundVSyncOn)();
++    }
++    return failed;
++}
+diff --git a/repro_tools/xdlink/xd_tables.c b/repro_tools/xdlink/xd_tables.c
+new file mode 100644
+index 0000000..3a0c7d8
+--- /dev/null
++++ b/repro_tools/xdlink/xd_tables.c
+@@ -0,0 +1,340 @@
++// Generated by make_xd_tables.py from XD's GBA link programs. Do not edit.
++#include "xd_link.h"
++
++const u32 gColosseumProgram = 0x089AA144;
++
++const struct XdProgram gXdPrograms[] =
++{
++    {   // 02_TEST_maxbtl_bin.gba
++        0x18280, 0xFCEDEDB8, 0x180A8, 0x3E0, 0x18070, 0x20D80, 0x05ADE281,
++        4,
++        {
++            {0x0200ABBE, XD_CALL_IDENTIFY},
++            {0x0200AD44, XD_CALL_READ},
++            {0x0200FF62, XD_CALL_VERIFY},
++            {0x0200FFAA, XD_CALL_VERIFY_N},
++        },
++        {
++            0x0200FFC1, // identifyFlash
++            0x0200FD39, // readFlash
++            0x0200FE05, // verifyFlashSector
++            0x0200FE9D, // verifyFlashSectorNBytes
++            0x00000000, // savePhase
++            0x02007E39, // soundVSyncOff
++            0x02007E85, // soundVSyncOn
++            0x020259E8, // programFlashByte
++            0x020259E0, // programFlashSector
++            0x020259F0, // eraseFlashChip
++            0x020259F4, // eraseFlashSector
++            0x020259DC, // waitForFlashWrite
++            0x020259F8, // flashMaxTime
++            0x020259E4, // flash
++        },
++    },
++    {   // 03_TEST_maxbtl_english_bin.gba
++        0x1A420, 0x3F06E6EE, 0x1A248, 0x3E0, 0x1A204, 0x27120, 0xE0B336DC,
++        4,
++        {
++            {0x0200B28A, XD_CALL_IDENTIFY},
++            {0x0200B3E0, XD_CALL_READ},
++            {0x020107E6, XD_CALL_VERIFY},
++            {0x0201082E, XD_CALL_VERIFY_N},
++        },
++        {
++            0x02010845, // identifyFlash
++            0x020105BD, // readFlash
++            0x02010689, // verifyFlashSector
++            0x02010721, // verifyFlashSectorNBytes
++            0x00000000, // savePhase
++            0x020084A9, // soundVSyncOff
++            0x020084F5, // soundVSyncOn
++            0x0202BDD8, // programFlashByte
++            0x0202BDD0, // programFlashSector
++            0x0202BDE0, // eraseFlashChip
++            0x0202BDE4, // eraseFlashSector
++            0x0202BDCC, // waitForFlashWrite
++            0x0202BDE8, // flashMaxTime
++            0x0202BDD4, // flash
++        },
++    },
++    {   // 04_TEST_maxbtl_france_bin.gba
++        0x1A420, 0x379F2A5F, 0x1A248, 0x3E0, 0x1A20C, 0x27118, 0x50361A33,
++        4,
++        {
++            {0x0200B26E, XD_CALL_IDENTIFY},
++            {0x0200B3C4, XD_CALL_READ},
++            {0x020107CA, XD_CALL_VERIFY},
++            {0x02010812, XD_CALL_VERIFY_N},
++        },
++        {
++            0x02010829, // identifyFlash
++            0x020105A1, // readFlash
++            0x0201066D, // verifyFlashSector
++            0x02010705, // verifyFlashSectorNBytes
++            0x00000000, // savePhase
++            0x0200848D, // soundVSyncOff
++            0x020084D9, // soundVSyncOn
++            0x0202BDD8, // programFlashByte
++            0x0202BDD0, // programFlashSector
++            0x0202BDE0, // eraseFlashChip
++            0x0202BDE4, // eraseFlashSector
++            0x0202BDCC, // waitForFlashWrite
++            0x0202BDE8, // flashMaxTime
++            0x0202BDD4, // flash
++        },
++    },
++    {   // 05_TEST_maxbtl_germany_bin.gba
++        0x1A3E0, 0x7FF09899, 0x1A218, 0x3E0, 0x1A1D8, 0x27164, 0xDC06A179,
++        4,
++        {
++            {0x0200B28E, XD_CALL_IDENTIFY},
++            {0x0200B3E4, XD_CALL_READ},
++            {0x020107EA, XD_CALL_VERIFY},
++            {0x02010832, XD_CALL_VERIFY_N},
++        },
++        {
++            0x02010849, // identifyFlash
++            0x020105C1, // readFlash
++            0x0201068D, // verifyFlashSector
++            0x02010725, // verifyFlashSectorNBytes
++            0x00000000, // savePhase
++            0x020084AD, // soundVSyncOff
++            0x020084F9, // soundVSyncOn
++            0x0202BE28, // programFlashByte
++            0x0202BE20, // programFlashSector
++            0x0202BE30, // eraseFlashChip
++            0x0202BE34, // eraseFlashSector
++            0x0202BE1C, // waitForFlashWrite
++            0x0202BE38, // flashMaxTime
++            0x0202BE24, // flash
++        },
++    },
++    {   // 06_TEST_maxbtl_italy_bin.gba
++        0x1A420, 0x2A0488A7, 0x1A248, 0x3E0, 0x1A204, 0x27140, 0xBC644FCF,
++        4,
++        {
++            {0x0200B28E, XD_CALL_IDENTIFY},
++            {0x0200B3E4, XD_CALL_READ},
++            {0x020107EA, XD_CALL_VERIFY},
++            {0x02010832, XD_CALL_VERIFY_N},
++        },
++        {
++            0x02010849, // identifyFlash
++            0x020105C1, // readFlash
++            0x0201068D, // verifyFlashSector
++            0x02010725, // verifyFlashSectorNBytes
++            0x00000000, // savePhase
++            0x020084AD, // soundVSyncOff
++            0x020084F9, // soundVSyncOn
++            0x0202BDF8, // programFlashByte
++            0x0202BDF0, // programFlashSector
++            0x0202BE00, // eraseFlashChip
++            0x0202BE04, // eraseFlashSector
++            0x0202BDEC, // waitForFlashWrite
++            0x0202BE08, // flashMaxTime
++            0x0202BDF4, // flash
++        },
++    },
++    {   // 07_TEST_maxbtl_spain_bin.gba
++        0x1A460, 0x5FCB5A89, 0x1A298, 0x3E0, 0x1A258, 0x2719C, 0xFCE3CFED,
++        4,
++        {
++            {0x0200B29A, XD_CALL_IDENTIFY},
++            {0x0200B3F0, XD_CALL_READ},
++            {0x020107F6, XD_CALL_VERIFY},
++            {0x0201083E, XD_CALL_VERIFY_N},
++        },
++        {
++            0x02010855, // identifyFlash
++            0x020105CD, // readFlash
++            0x02010699, // verifyFlashSector
++            0x02010731, // verifyFlashSectorNBytes
++            0x00000000, // savePhase
++            0x020084B9, // soundVSyncOff
++            0x02008505, // soundVSyncOn
++            0x0202BE58, // programFlashByte
++            0x0202BE50, // programFlashSector
++            0x0202BE60, // eraseFlashChip
++            0x0202BE64, // eraseFlashSector
++            0x0202BE4C, // waitForFlashWrite
++            0x0202BE68, // flashMaxTime
++            0x0202BE54, // flash
++        },
++    },
++    {   // 08_TEST_maxcng_bin.gba
++        0xFEA0, 0x4C1FF427, 0xFCD8, 0x3E0, 0xFC9C, 0x161D4, 0xE1136E4A,
++        7,
++        {
++            {0x020041D2, XD_CALL_IDENTIFY},
++            {0x02004358, XD_CALL_READ},
++            {0x0200571A, XD_CALL_READ},
++            {0x020098AA, XD_CALL_VERIFY},
++            {0x020098F2, XD_CALL_VERIFY_N},
++            {0x020009F0, XD_CALL_SAVE_PHASE},
++            {0x02000A28, XD_CALL_SAVE_PHASE},
++        },
++        {
++            0x02009909, // identifyFlash
++            0x02009681, // readFlash
++            0x0200974D, // verifyFlashSector
++            0x020097E5, // verifyFlashSectorNBytes
++            0x020055C1, // savePhase
++            0x02001F6D, // soundVSyncOff
++            0x02001FB9, // soundVSyncOn
++            0x0201A128, // programFlashByte
++            0x0201A120, // programFlashSector
++            0x0201A130, // eraseFlashChip
++            0x0201A134, // eraseFlashSector
++            0x0201A11C, // waitForFlashWrite
++            0x0201A138, // flashMaxTime
++            0x0201A124, // flash
++        },
++    },
++    {   // 09_TEST_maxcng_english_bin.gba
++        0x11C80, 0xEEF2410B, 0x11AA8, 0x3E0, 0x11A68, 0x1BBAC, 0x293974A7,
++        7,
++        {
++            {0x02004316, XD_CALL_IDENTIFY},
++            {0x0200449C, XD_CALL_READ},
++            {0x0200585E, XD_CALL_READ},
++            {0x02009BE2, XD_CALL_VERIFY},
++            {0x02009C2A, XD_CALL_VERIFY_N},
++            {0x02000AC8, XD_CALL_SAVE_PHASE},
++            {0x02000B00, XD_CALL_SAVE_PHASE},
++        },
++        {
++            0x02009C41, // identifyFlash
++            0x020099B9, // readFlash
++            0x02009A85, // verifyFlashSector
++            0x02009B1D, // verifyFlashSectorNBytes
++            0x02005705, // savePhase
++            0x02002045, // soundVSyncOff
++            0x02002091, // soundVSyncOn
++            0x0201FB48, // programFlashByte
++            0x0201FB40, // programFlashSector
++            0x0201FB50, // eraseFlashChip
++            0x0201FB54, // eraseFlashSector
++            0x0201FB3C, // waitForFlashWrite
++            0x0201FB58, // flashMaxTime
++            0x0201FB44, // flash
++        },
++    },
++    {   // 10_TEST_maxcng_france_bin.gba
++        0x11C80, 0x3E088968, 0x11AA8, 0x3E0, 0x11A64, 0x1BB98, 0x3399CD1A,
++        7,
++        {
++            {0x020042FE, XD_CALL_IDENTIFY},
++            {0x02004484, XD_CALL_READ},
++            {0x02005846, XD_CALL_READ},
++            {0x02009BCA, XD_CALL_VERIFY},
++            {0x02009C12, XD_CALL_VERIFY_N},
++            {0x02000AB0, XD_CALL_SAVE_PHASE},
++            {0x02000AE8, XD_CALL_SAVE_PHASE},
++        },
++        {
++            0x02009C29, // identifyFlash
++            0x020099A1, // readFlash
++            0x02009A6D, // verifyFlashSector
++            0x02009B05, // verifyFlashSectorNBytes
++            0x020056ED, // savePhase
++            0x0200202D, // soundVSyncOff
++            0x02002079, // soundVSyncOn
++            0x0201FB38, // programFlashByte
++            0x0201FB30, // programFlashSector
++            0x0201FB40, // eraseFlashChip
++            0x0201FB44, // eraseFlashSector
++            0x0201FB2C, // waitForFlashWrite
++            0x0201FB48, // flashMaxTime
++            0x0201FB34, // flash
++        },
++    },
++    {   // 11_TEST_maxcng_germany_bin.gba
++        0x11CA0, 0xF4E95A30, 0x11AC8, 0x3E0, 0x11A90, 0x1BC44, 0xEE7DE00D,
++        7,
++        {
++            {0x0200430E, XD_CALL_IDENTIFY},
++            {0x02004494, XD_CALL_READ},
++            {0x02005856, XD_CALL_READ},
++            {0x02009BDA, XD_CALL_VERIFY},
++            {0x02009C22, XD_CALL_VERIFY_N},
++            {0x02000AC0, XD_CALL_SAVE_PHASE},
++            {0x02000AF8, XD_CALL_SAVE_PHASE},
++        },
++        {
++            0x02009C39, // identifyFlash
++            0x020099B1, // readFlash
++            0x02009A7D, // verifyFlashSector
++            0x02009B15, // verifyFlashSectorNBytes
++            0x020056FD, // savePhase
++            0x0200203D, // soundVSyncOff
++            0x02002089, // soundVSyncOn
++            0x0201FBE8, // programFlashByte
++            0x0201FBE0, // programFlashSector
++            0x0201FBF0, // eraseFlashChip
++            0x0201FBF4, // eraseFlashSector
++            0x0201FBDC, // waitForFlashWrite
++            0x0201FBF8, // flashMaxTime
++            0x0201FBE4, // flash
++        },
++    },
++    {   // 12_TEST_maxcng_italy_bin.gba
++        0x11C80, 0xD8036A78, 0x11AB8, 0x3E0, 0x11A80, 0x1BBCC, 0xCDBE2F7B,
++        7,
++        {
++            {0x0200431A, XD_CALL_IDENTIFY},
++            {0x020044A0, XD_CALL_READ},
++            {0x02005862, XD_CALL_READ},
++            {0x02009BE6, XD_CALL_VERIFY},
++            {0x02009C2E, XD_CALL_VERIFY_N},
++            {0x02000ACC, XD_CALL_SAVE_PHASE},
++            {0x02000B04, XD_CALL_SAVE_PHASE},
++        },
++        {
++            0x02009C45, // identifyFlash
++            0x020099BD, // readFlash
++            0x02009A89, // verifyFlashSector
++            0x02009B21, // verifyFlashSectorNBytes
++            0x02005709, // savePhase
++            0x02002049, // soundVSyncOff
++            0x02002095, // soundVSyncOn
++            0x0201FB68, // programFlashByte
++            0x0201FB60, // programFlashSector
++            0x0201FB70, // eraseFlashChip
++            0x0201FB74, // eraseFlashSector
++            0x0201FB5C, // waitForFlashWrite
++            0x0201FB78, // flashMaxTime
++            0x0201FB64, // flash
++        },
++    },
++    {   // 13_TEST_maxcng_spain_bin.gba
++        0x11CC0, 0x1870903F, 0x11AE8, 0x3E0, 0x11AA4, 0x1BC0C, 0xE4C0ABB8,
++        7,
++        {
++            {0x0200431A, XD_CALL_IDENTIFY},
++            {0x020044A0, XD_CALL_READ},
++            {0x02005862, XD_CALL_READ},
++            {0x02009BE6, XD_CALL_VERIFY},
++            {0x02009C2E, XD_CALL_VERIFY_N},
++            {0x02000ACC, XD_CALL_SAVE_PHASE},
++            {0x02000B04, XD_CALL_SAVE_PHASE},
++        },
++        {
++            0x02009C45, // identifyFlash
++            0x020099BD, // readFlash
++            0x02009A89, // verifyFlashSector
++            0x02009B21, // verifyFlashSectorNBytes
++            0x02005709, // savePhase
++            0x02002049, // soundVSyncOff
++            0x02002095, // soundVSyncOn
++            0x0201FBA8, // programFlashByte
++            0x0201FBA0, // programFlashSector
++            0x0201FBB0, // eraseFlashChip
++            0x0201FBB4, // eraseFlashSector
++            0x0201FB9C, // waitForFlashWrite
++            0x0201FBB8, // flashMaxTime
++            0x0201FBA4, // flash
++        },
++    },
++};
++
++const u32 gNumXdPrograms = 12;
+-- 
+2.43.0
+
