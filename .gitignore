@@ -1,0 +1,19 @@
+# Never commit game data: ROMs, saves, disc images, the dumper's boot.dol
+*.gba
+*.sav
+*.iso
+*.gcm
+*.rvz
+*.ciso
+*.dol
+
+# Build and test outputs
+build/
+*.o
+*.elf
+*.map
+*.so
+src/test/test_scan
+src/test/test_write
+__pycache__/
+*.pyc
